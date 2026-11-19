@@ -1,0 +1,476 @@
+"""
+EditaJá — worker de edição sob demanda (Modal).
+
+Fluxo:  app (Next.js) --POST /editar {video_id}--> este worker
+        worker baixa o bruto do Supabase Storage, roda editor.py (transcribe -> plan -> render),
+        sobe o resultado em `editados/` e atualiza a linha em `videos` (status/etapa/progresso).
+        A tela da fila acompanha em tempo real pelo Supabase Realtime.
+
+Deploy (uma vez):
+    pip install modal && modal token new
+    modal secret create editaja-supabase SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... WORKER_TOKEN=<um segredo longo>
+    modal deploy worker/modal_app.py
+O endpoint gerado (https://<conta>--editaja-worker-editar.modal.run) vai na Vercel como EDITAJA_WORKER_URL.
+Custo: só cobra enquanto um vídeo está sendo editado (CPU, ~3-5 min por vídeo de 2 min).
+"""
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import tempfile
+
+import modal
+
+SISTEMA = pathlib.Path(__file__).resolve().parent.parent.parent / "sistema"  # /mnt/project-files/sistema
+
+image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .apt_install("ffmpeg", "fonts-dejavu-core", "fonts-noto-color-emoji", "fonts-inter")
+    .pip_install("pywhispercpp", "Pillow", "supabase>=2.4", "fastapi[standard]", "anthropic")
+    .add_local_file(str(SISTEMA / "editor.py"), "/editor/editor.py")
+    .add_local_dir(str(SISTEMA / "sons"), "/editor/sons")
+    .add_local_file(str(SISTEMA / "modelos" / "ggml-small-q5_1.bin"), "/editor/modelos/ggml-small-q5_1.bin")
+)
+
+app = modal.App("editaja-worker", image=image)
+secret = modal.Secret.from_name("editaja-supabase")
+
+ETAPAS = ["upload", "transcricao", "cortes", "velocidade", "sons", "imagens", "render"]
+
+
+def _db():
+    from supabase import create_client
+    return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
+
+
+def _status(db, video_id, **campos):
+    db.table("videos").update(campos).eq("id", video_id).execute()
+
+
+def _etapa(db, video_id, nome):
+    i = ETAPAS.index(nome)
+    _status(db, video_id, status="editando", etapa=i, progresso=round(i / len(ETAPAS) * 100, 1))
+
+
+# ---------------------------------------------------------------- produto: imagens onde a pessoa aponta
+GATILHOS = {
+    "falso": ("falso", "falsa", "falsificado", "réplica", "replica", "pirata"),
+    "original": ("original", "verdadeiro", "verdadeira", "oficial"),
+    "print": ("clica", "clique", "clicar", "loja", "avaliação", "avaliações"),
+}
+
+
+def _baixar_imagens_produto(db, produto_id, pasta):
+    """Baixa só as imagens do produto vinculado. Retorna {rotulo: [arquivos]}."""
+    if not produto_id:
+        return {}
+    por_rotulo = {}
+    rows = db.table("produto_imagens").select("*").eq("produto_id", produto_id).order("ordem").execute().data or []
+    os.makedirs(pasta, exist_ok=True)
+    for r in rows:
+        nome = f"{r['id']}{pathlib.Path(r['storage_path']).suffix or '.png'}"
+        with open(os.path.join(pasta, nome), "wb") as f:
+            f.write(db.storage.from_("biblioteca").download(r["storage_path"]))
+        por_rotulo.setdefault(r["rotulo"], []).append(nome)
+    return por_rotulo
+
+
+def _tempo_final(trechos, t_bruto, vel):
+    """Converte um instante do bruto para o instante no vídeo final (depois dos cortes e da velocidade)."""
+    acc = 0.0
+    for sg in trechos:
+        if sg["s"] <= t_bruto <= sg["e"]:
+            return (acc + t_bruto - sg["s"]) / vel
+        acc += sg["e"] - sg["s"]
+    return None
+
+
+def _sobreposicoes(trechos, frases, imagens, palavras_produto, vel):
+    """1 imagem por gatilho falado, inclinada, sem animação, alternando o lado (esq/dir), com som de gota."""
+    if not imagens:
+        return []
+    pontos, arquivos, usados, lado = [], [], {}, 0
+    for fr in frases:
+        txt = fr["texto"].lower()
+        rot = next((r for r, ws in GATILHOS.items() if any(w in txt for w in ws)), None)
+        if rot is None and any(w.lower() in txt for w in palavras_produto):
+            rot = "produto"
+        lista = imagens.get(rot) or (imagens.get("produto") or imagens.get("original") if rot in ("produto", "original") else None)
+        if not lista:
+            continue
+        de = _tempo_final(trechos, fr["s"] + 0.05, vel)
+        if de is None:
+            continue
+        k = usados.get(rot, 0); usados[rot] = k + 1
+        arquivos.append(lista[k % len(lista)])
+        pontos.append({"x": 0.05 if lado % 2 == 0 else 0.53, "y": 0.10, "de": round(de, 2),
+                       "ate": round(de + 1.6, 2), "angulo": -7 if lado % 2 == 0 else 6})
+        lado += 1
+    if not pontos:
+        return []
+    return [{"tipo": "apontado", "arquivos": arquivos, "pontos": pontos, "largura": 0.42,
+             "ate": max(p["ate"] for p in pontos), "som": "gota"}]
+
+
+# ---------------------------------------------------------------- hooks × CTAs
+PALAVRAS_CTA = ("link", "carrinho", "clica", "clique", "compra", "comenta", "garante", "corre", "segue", "bio")
+
+
+def _casar_texto(frases, texto):
+    """Acha o trecho (s, e) da fala mais parecido com o texto informado pelo usuário."""
+    import difflib
+    alvo = texto.lower().split()
+    melhor, faixa = 0.0, None
+    for i in range(len(frases)):
+        for j in range(i, min(i + 4, len(frases))):
+            cand = " ".join(f["texto"] for f in frases[i:j + 1]).lower().split()
+            r = difflib.SequenceMatcher(None, alvo, cand).ratio()
+            if r > melhor:
+                melhor, faixa = r, (frases[i]["s"], frases[j]["e"])
+    return faixa if melhor >= 0.45 else None
+
+
+def _detectar_hooks_ctas(frases, duracao):
+    """Com ANTHROPIC_API_KEY: Claude lê a transcrição e marca ganchos e CTAs. Sem chave: heurística simples."""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            import anthropic
+            linhas = "\n".join(f"{i}: [{f['s']:.1f}-{f['e']:.1f}] {f['texto']}" for i, f in enumerate(frases))
+            msg = anthropic.Anthropic().messages.create(
+                model="claude-sonnet-5-5", max_tokens=1500,
+                messages=[{"role": "user", "content":
+                    "Transcrição de um vídeo bruto de TikTok, uma frase por linha (índice: [início-fim] texto).\n"
+                    "A pessoa pode ter gravado vários GANCHOS alternativos no início e várias CTAs alternativas no final.\n"
+                    "Responda só JSON: {\"hooks\": [[i_ini, i_fim], ...], \"ctas\": [[i_ini, i_fim], ...]} com os intervalos "
+                    "de frases de cada gancho e de cada CTA. Lista vazia se não houver.\n\n" + linhas}])
+            txt = msg.content[0].text
+            d = json.loads(txt[txt.index("{"): txt.rindex("}") + 1])
+            faixa = lambda a, b: {"texto": " ".join(f["texto"] for f in frases[a:b + 1]), "s": frases[a]["s"], "e": frases[b]["e"]}
+            return [faixa(*x) for x in d.get("hooks", [])], [faixa(*x) for x in d.get("ctas", [])]
+        except Exception as e:  # cai na heurística
+            print("detecção por IA falhou:", e)
+    ctas = [{"texto": f["texto"], "s": f["s"], "e": f["e"]} for f in frases
+            if f["s"] > duracao * 0.7 and any(w in f["texto"].lower() for w in PALAVRAS_CTA)]
+    return [], ctas
+
+
+def _sem_sobrepor(trechos, faixas):
+    return [t for t in trechos if not any(t["s"] < e and t["e"] > s for s, e in faixas)]
+
+
+def _dentro(trechos, s, e):
+    return [dict(t, s=max(t["s"], s), e=min(t["e"], e)) for t in trechos if t["s"] < e and t["e"] > s]
+
+
+def _combinacoes(plano, frases, comb, duracao):
+    """Devolve [(rotulo, hook_idx, cta_idx, trechos)]. Sem ganchos/CTAs múltiplos, devolve só o vídeo normal."""
+    comb = comb or {}
+    if comb.get("automatico", True):
+        hooks, ctas = _detectar_hooks_ctas(frases, duracao)
+    else:
+        def resolver(lista):
+            out = []
+            for t in lista or []:
+                if not (t.get("texto") or "").strip():
+                    continue
+                faixa = (t["s"], t["e"]) if t.get("s") is not None else _casar_texto(frases, t["texto"])
+                if faixa:
+                    out.append({"texto": t["texto"], "s": faixa[0], "e": faixa[1]})
+            return out
+        hooks, ctas = resolver(comb.get("hooks")), resolver(comb.get("ctas"))
+    if len(hooks) <= 1 and len(ctas) <= 1:
+        return [(None, None, None, plano["trechos"])]
+    faixas = [(x["s"], x["e"]) for x in hooks + ctas]
+    corpo = _sem_sobrepor(plano["trechos"], faixas)
+    saida = []
+    for i, h in enumerate(hooks or [None]):
+        for j, c in enumerate(ctas or [None]):
+            tr = (_dentro(plano["trechos"], h["s"], h["e"]) if h else []) + corpo + (_dentro(plano["trechos"], c["s"], c["e"]) if c else [])
+            rot = " + ".join(x for x in (f"Gancho {i + 1}" if h else "", f"CTA {j + 1}" if c else "") if x)
+            saida.append((rot, i if h else None, j if c else None, tr))
+    return saida
+
+
+@app.function(secrets=[secret], cpu=4.0, memory=8192, timeout=60 * 45)
+def editar(video_id: str):
+    db = _db()
+    v = db.table("videos").select("*").eq("id", video_id).single().execute().data
+    opcoes = v.get("opcoes") or {}
+    perfil = db.table("profiles").select("regras").eq("id", v["owner_id"]).single().execute().data or {}
+    regras = perfil.get("regras") or {}
+    # estilo escolhido no envio (ou o padrão da conta): versão atual vira o perfil da edição
+    q = db.table("estilo_atual").select("*").eq("owner_id", v["owner_id"])
+    q = q.eq("estilo_id", v["estilo_id"]) if v.get("estilo_id") else q.eq("slug", "clean")
+    estilo = (q.limit(1).execute().data or [{}])[0]
+    perfil_estilo = estilo.get("perfil") or {}
+    regras = {**regras, **perfil_estilo}
+    produto_id = v.get("produto_id") or opcoes.get("produto_id")
+    produto = {}
+    if produto_id:
+        # o app pode mandar o id do banco (uuid) ou o apelido local do produto (ex.: "camisas-gremio")
+        import re as _re
+        campo = "id" if _re.fullmatch(r"[0-9a-fA-F-]{36}", str(produto_id)) else "slug"
+        produto = (db.table("produtos").select("*").eq("owner_id", v["owner_id"]).eq(campo, produto_id)
+                   .limit(1).execute().data or [{}])[0]
+        produto_id = produto.get("id")
+    sys.path.insert(0, os.environ.get("EDITOR_DIR", "/editor"))
+    import editor  # noqa: E402  (o mesmo editor.py usado hoje, com as regras fixas)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            _etapa(db, video_id, "upload")
+            ext = pathlib.Path(v["bruto_path"]).suffix or ".mp4"
+            bruto = os.path.join(tmp, f"bruto{ext}")
+            with open(bruto, "wb") as f:
+                f.write(db.storage.from_("brutos").download(v["bruto_path"]))
+            pasta_imgs = os.path.join(tmp, "imagens")
+            imagens = _baixar_imagens_produto(db, produto_id, pasta_imgs)   # só as imagens DESTE produto
+
+            _etapa(db, video_id, "transcricao")
+            editor.transcribe(bruto)
+            tr_path, plano_path, saida_padrao = editor.paths(bruto)
+            frases = (json.load(open(tr_path)).get("frases") or []) if os.path.exists(tr_path) else []
+
+            _etapa(db, video_id, "cortes")
+            editor.plan(bruto)
+            plano = json.load(open(plano_path))
+            vel = float(regras.get("velocidade", 1.1))
+            plano["velocidade"] = vel
+            # headline OPCIONAL: "sem" = nenhum texto na tela; "manual" = texto e posição da pessoa;
+            # "auto" = a IA usa o gancho falado (primeira frase) se a pessoa não escreveu nada.
+            hl = opcoes.get("headline") or {}
+            modo = hl.get("modo") or ("sem" if v.get("headline_ativa") is False else "auto")
+            tit = dict(plano.get("titulo") or {})
+            if modo == "sem" or v.get("headline_ativa") is False:
+                tit.update(texto="", ativo=False)
+            else:
+                texto = (v.get("headline") or hl.get("texto") or "").strip()
+                if not texto and modo == "auto" and frases:
+                    texto = frases[0]["texto"].strip()
+                tit.update(texto=texto, ativo=bool(texto))
+                x, y = v.get("headline_x", hl.get("x")), v.get("headline_y", hl.get("y"))
+                if x is not None: tit["x"] = float(x)
+                if y is not None: tit["y"] = float(y)
+                if texto and not v.get("headline"):
+                    _status(db, video_id, headline=texto)
+            plano["titulo"] = tit
+            plano["estilo"] = {"nome": estilo.get("nome"), "versao": estilo.get("n"), "perfil": perfil_estilo,
+                               "regras": estilo.get("regras") or []}
+            # reação de surpresa no início: só quando pedida para este vídeo (ou o estilo manda "sempre")
+            surpresa = bool(opcoes.get("surpresa") or opcoes.get("unboxing")
+                            or perfil_estilo.get("surpresa_no_inicio", perfil_estilo.get("uau_no_inicio")) in (True, "sempre"))
+            if plano.get("momentos_surpresa") and not surpresa:
+                _status(db, video_id, surpresas=plano["momentos_surpresa"][:3])   # só sugere na Aprovação
+            combos = _combinacoes(plano, frases, v.get("combinacoes") or opcoes.get("combinacoes"), plano["duracao_original"])
+            if len(combos) > 1:
+                _status(db, video_id, variante=f"{len(combos)} combinações")
+
+            _etapa(db, video_id, "render")
+            for k, (rotulo, hi, ci, trechos) in enumerate(combos):
+                p = dict(plano, trechos=trechos)
+                p["sobreposicoes"] = _sobreposicoes(trechos, frases, imagens, produto.get("palavras") or [], vel)
+                json.dump(p, open(plano_path, "w"), ensure_ascii=False, indent=1)
+                saida = saida_padrao.replace(".mp4", f"_{k + 1}.mp4")
+                editor.render(bruto, saida, images_root=pasta_imgs, surpresa=surpresa)
+
+                alvo_id = video_id
+                if k > 0:  # cada combinação extra vira um vídeo próprio na tela de aprovação
+                    novo = {kk: v[kk] for kk in ("owner_id", "titulo", "produto", "headline", "opcoes", "bruto_path", "estilo_id")}
+                    novo.update(titulo=f"{v['titulo']} · {rotulo}", origem_id=video_id, produto_id=produto_id,
+                                hook_idx=hi, cta_idx=ci, variante=rotulo, status="editando", versao=1)
+                    alvo_id = db.table("videos").insert(novo).execute().data[0]["id"]
+                versao = v["versao"] if k == 0 else 1
+                destino = f"{v['owner_id']}/{alvo_id}/v{versao}.mp4"
+                with open(saida, "rb") as f:
+                    db.storage.from_("editados").upload(destino, f.read(), {"content-type": "video/mp4", "upsert": "true"})
+                extra = {"variante": rotulo, "hook_idx": hi, "cta_idx": ci} if rotulo else {}
+                # qual gancho este vídeo usou: alimenta o ranking "Em alta" (views por gancho e por época)
+                hooks = ((v.get("combinacoes") or opcoes.get("combinacoes") or {}).get("hooks") or [])
+                gtxt = (hooks[hi].get("texto") if hi is not None and hi < len(hooks) else None) or plano["titulo"].get("texto") or (frases[0]["texto"] if frases else None)
+                if gtxt: extra["gancho_texto"] = gtxt.strip()[:300]
+                _status(db, alvo_id, status="aprovacao", etapa=len(ETAPAS) - 1, progresso=100, editado_path=destino,
+                        estilo_id=estilo.get("estilo_id"), estilo_versao=estilo.get("n"), produto_id=produto_id,
+                        duracao_bruto=editor.duration(bruto), duracao_final=editor.duration(saida),
+                        stats={"cortes": len(trechos), "imagens": len((p["sobreposicoes"] or [{}])[0].get("arquivos", [])) if p["sobreposicoes"] else 0,
+                               "sons": len((p["sobreposicoes"] or [{}])[0].get("pontos", [])) if p["sobreposicoes"] else 0},
+                        erro=None, **extra)
+                try:  # legenda/descrição/hashtags no jeito das referências de "Ganchos e Legendas"
+                    fala = " ".join(f["texto"] for f in frases if any(t["s"] <= f["s"] < t["e"] for t in trechos))
+                    _status(db, alvo_id, **_escrever_textos(db, v, produto, fala))
+                except Exception as e:
+                    print("textos não gerados:", e)
+        except Exception as e:  # deixa o erro visível na tela da fila
+            _status(db, video_id, status="erro", erro=str(e)[:500])
+            raise
+
+
+# ---------------------------------------------------------------- legendas no jeito das referências
+
+def _referencias_texto(db, owner_id, produto_id, tipo, n=8):
+    """Exemplos de 'Ganchos e Legendas': do produto primeiro, com estrela antes, depois os gerais."""
+    q = db.table("textos_referencia").select("texto, produto_id, destaque").eq("owner_id", owner_id).eq("tipo", tipo)
+    linhas = q.order("destaque", desc=True).order("created_at", desc=True).limit(60).execute().data or []
+    peso = lambda r: (4 if produto_id and r["produto_id"] == produto_id else 2 if r["produto_id"] is None else 0) + (1 if r["destaque"] else 0)
+    return [r["texto"] for r in sorted((r for r in linhas if r["produto_id"] in (None, produto_id)), key=peso, reverse=True)[:n]]
+
+
+def _escrever_textos(db, v, produto, fala):
+    """Legenda, descrição e hashtags escritas com as referências do Eduardo como exemplo (few-shot)."""
+    refs = {t: _referencias_texto(db, v["owner_id"], produto.get("id"), t) for t in ("legenda", "descricao", "hashtags", "cta", "gancho")}
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            import anthropic
+            exemplos = "\n".join(f"<{t}>\n" + "\n---\n".join(xs) + f"\n</{t}>" for t, xs in refs.items() if xs)
+            msg = anthropic.Anthropic().messages.create(model="claude-sonnet-5-5", max_tokens=1200, messages=[{"role": "user", "content":
+                f"Você escreve os textos de posts de TikTok/Reels para o criador abaixo. Produto: {produto.get('nome') or v.get('produto')}.\n"
+                f"Gancho do vídeo: {v.get('headline')}\nFala do vídeo: {fala[:2500]}\n\n"
+                "Exemplos reais do criador (copie o JEITO: tamanho, emojis, caixa alta, perguntas, abertura, quantidade e tipo de hashtags; "
+                "não copie as frases):\n" + exemplos + "\n\nNada genérico: cite detalhes reais que aparecem na fala. "
+                "Responda só JSON: {\"legenda\": \"...\", \"descricao\": \"...\", \"hashtags\": [\"#...\"]}"}])
+            txt = msg.content[0].text
+            d = json.loads(txt[txt.index("{"): txt.rindex("}") + 1])
+            return {"legenda": d["legenda"], "descricao": d["descricao"], "hashtags": d["hashtags"][:10]}
+        except Exception as e:
+            print("textos por IA falharam:", e)
+    tags = []
+    for linha in refs["hashtags"]:
+        tags += [w for w in linha.split() if w.startswith("#") and w not in tags]
+    cta = (refs["cta"] or ["Comenta EU QUERO que eu te mando o link"])[0]
+    return {"legenda": v.get("headline") or produto.get("nome", ""), "descricao": f"{fala[:180].strip()}... {cta}.",
+            "hashtags": tags[:6]}
+
+
+@app.function(secrets=[secret], timeout=120)
+def escrever_roteiro(roteiro_id: str):
+    """Roteiros (opcional): escreve o meio do vídeo com as palavras e as imagens do produto."""
+    db = _db()
+    r = db.table("roteiros").select("*").eq("id", roteiro_id).single().execute().data
+    produto = db.table("produtos").select("nome, descricao, palavras").eq("id", r["produto_id"]).single().execute().data
+    rotulos = [x["rotulo"] for x in db.table("produto_imagens").select("rotulo").eq("produto_id", r["produto_id"]).execute().data or []]
+    corpo = r.get("corpo") or ""
+    if os.environ.get("ANTHROPIC_API_KEY") and not corpo:
+        import anthropic
+        msg = anthropic.Anthropic().messages.create(model="claude-sonnet-5-5", max_tokens=800, messages=[{"role": "user", "content":
+            f"Escreva o MEIO de um roteiro de vídeo curto (entre o gancho e o CTA) para {produto['nome']} ({produto.get('descricao') or ''}). "
+            f"Palavras do produto: {', '.join(produto.get('palavras') or [])}. Imagens disponíveis: {', '.join(sorted(set(rotulos))) or 'nenhuma'}. "
+            "Se houver imagens 'falso', inclua o momento de apontar para os lados dizendo 'falso'. 4 passos curtos numerados, em português, "
+            "do jeito que se fala. Ganchos que serão usados: " + " | ".join(r["ganchos"]) + ". CTAs: " + " | ".join(r["ctas"])}])
+        corpo = msg.content[0].text.strip()
+    db.table("roteiros").update({"corpo": corpo}).eq("id", roteiro_id).execute()
+    return corpo
+
+
+# ---------------------------------------------------------------- análise completa de referência
+def _cortes_de_cena(video, limiar=0.3):
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-i", video, "-vf", f"select='gt(scene,{limiar})',showinfo",
+                        "-f", "null", "-"], capture_output=True, text=True)
+    import re
+    return [float(m) for m in re.findall(r"pts_time:([0-9.]+)", r.stderr)]
+
+
+def _frames(video, duracao, pasta, n=8):
+    os.makedirs(pasta, exist_ok=True)
+    out = []
+    for i in range(n):
+        t = duracao * (i + 0.5) / n
+        f = os.path.join(pasta, f"f{i}.jpg")
+        subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{t:.2f}", "-i", video, "-frames:v", "1", "-vf", "scale=540:-2", f, "-y"])
+        if os.path.exists(f):
+            out.append((t, f))
+    return out
+
+
+@app.function(secrets=[secret], cpu=4.0, memory=8192, timeout=60 * 20)
+def analisar_referencia(referencia_id: str):
+    """Registra tudo do vídeo de referência: fala, cortes, pausas, legendas (fonte, tamanho, cor, posição),
+    headline, imagens e sons. Grava em referencias.analise e cria sugestões de regra para o estilo."""
+    import base64
+    db = _db()
+    r = db.table("referencias").select("*").eq("id", referencia_id).single().execute().data
+    sys.path.insert(0, os.environ.get("EDITOR_DIR", "/editor"))
+    import editor  # noqa: E402
+    with tempfile.TemporaryDirectory() as tmp:
+        video = os.path.join(tmp, "ref" + (pathlib.Path(r["storage_path"]).suffix or ".mp4"))
+        with open(video, "wb") as f:
+            f.write(db.storage.from_("referencias").download(r["storage_path"]))
+        dur = editor.duration(video)
+        editor.transcribe(video)
+        tr_path = editor.paths(video)[0]
+        frases = (json.load(open(tr_path)).get("frases") or []) if os.path.exists(tr_path) else []
+        cortes = _cortes_de_cena(video)
+        pausas = [round(e - s, 2) for s, e in editor.silences(video)] if hasattr(editor, "silences") else []
+        analise = {
+            "duracao_s": round(dur, 1),
+            "transcricao": [{"t": round(f["s"], 1), "texto": f["texto"]} for f in frases],
+            "ritmo": {"cortes_por_min": round(len(cortes) / max(dur / 60, 0.01), 1), "pausa_max_s": max(pausas or [0]),
+                      "plano_medio_s": round(dur / max(len(cortes) + 1, 1), 2), "velocidade": "medir"},
+            "cortes_em": [round(c, 2) for c in cortes],
+        }
+        if os.environ.get("ANTHROPIC_API_KEY"):   # visão: fonte, posição, cor, imagens sobrepostas, sons implícitos
+            import anthropic
+            conteudo = []
+            for t, f in _frames(video, dur, os.path.join(tmp, "frames")):
+                conteudo += [{"type": "text", "text": f"Frame em {t:.1f}s"},
+                             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                          "data": base64.b64encode(open(f, "rb").read()).decode()}}]
+            conteudo.append({"type": "text", "text":
+                "Estes são frames de um vídeo de referência de TikTok. Transcrição:\n"
+                + "\n".join(f"[{x['t']}s] {x['texto']}" for x in analise["transcricao"])
+                + f"\nCortes de cena em: {analise['cortes_em']}\n"
+                "Descreva o estilo de edição. Responda só JSON com as chaves: resumo, legendas{usa,fonte,tamanho,cor,contorno,"
+                "posicao,palavras_por_tela,estilo}, headline{texto,ate_s,posicao,emoji}, imagens[{t,lado,inclinacao,duracao_s,o_que}], "
+                "sons[{t,som,gatilho}], camera, regras[] (regras curtas em português que um editor deve seguir para imitar este estilo)."})
+            msg = anthropic.Anthropic().messages.create(model="claude-sonnet-5-5", max_tokens=3000,
+                                                        messages=[{"role": "user", "content": conteudo}])
+            txt = msg.content[0].text
+            try:
+                analise.update(json.loads(txt[txt.index("{"): txt.rindex("}") + 1]))
+            except ValueError:
+                analise["resumo"] = txt[:500]
+        analise["status"] = "pronta"
+        db.table("referencias").update({"analise": analise, "transcricao": " ".join(f["texto"] for f in frases),
+                                        "analisado_em": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(), "modelo": "whisper + ffmpeg" + (" + claude" if os.environ.get("ANTHROPIC_API_KEY") else "")}
+                                       ).eq("id", referencia_id).execute()
+        if r.get("estilo_id"):
+            for k, regra in enumerate(analise.get("regras") or []):
+                db.table("sugestoes").insert({
+                    "owner_id": r["owner_id"], "estilo_id": r["estilo_id"], "referencia_id": referencia_id, "tipo": "aprovacao",
+                    "comentario": f"Nova referência analisada: {r['nome']}",
+                    "proposta": {"texto": regra, "regra": {"id": f"ref-{referencia_id[:8]}-{k}", "texto": regra,
+                                                           "tipo": "preferencia", "origem": r["nome"]}}}).execute()
+
+
+@app.function(secrets=[secret])
+@modal.fastapi_endpoint(method="POST")
+def enfileirar(body: dict):
+    """Chamado pelo app quando o upload termina ou quando o vídeo é recusado com comentário."""
+    from fastapi import HTTPException
+    token = (body or {}).get("token")
+    if token != os.environ["WORKER_TOKEN"]:
+        raise HTTPException(status_code=401, detail="token inválido")
+    video_id = body["video_id"]
+    _status(_db(), video_id, status="fila", etapa=0, progresso=0)
+    call = editar.spawn(video_id)
+    return {"ok": True, "call_id": call.object_id}
+
+
+@app.function(secrets=[secret])
+@modal.fastapi_endpoint(method="POST")
+def analisar(body: dict):
+    """Chamado pelo app quando uma referência termina de subir."""
+    from fastapi import HTTPException
+    if (body or {}).get("token") != os.environ["WORKER_TOKEN"]:
+        raise HTTPException(status_code=401, detail="token inválido")
+    call = analisar_referencia.spawn(body["referencia_id"])
+    return {"ok": True, "call_id": call.object_id}
+
+
+@app.function(secrets=[secret])
+@modal.fastapi_endpoint(method="POST")
+def roteiro(body: dict):
+    """Chamado pelo app quando um roteiro é salvo sem o meio escrito."""
+    from fastapi import HTTPException
+    if (body or {}).get("token") != os.environ["WORKER_TOKEN"]:
+        raise HTTPException(status_code=401, detail="token inválido")
+    return {"ok": True, "corpo": escrever_roteiro.remote(body["roteiro_id"])}

@@ -1,0 +1,11 @@
+{
+  "name": "EditaJá",
+  "short_name": "EditaJá",
+  "description": "Edição automática de vídeos para TikTok e Reels",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#16131f",
+  "theme_color": "#16131f",
+  "lang": "pt-BR",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
