@@ -1,9 +1,13 @@
 import { cn } from "@/lib/utils";
 import { Play } from "lucide-react";
+import { modoReal } from "@/lib/supabase";
+import { CapaReal } from "@/components/capa-video";
+import type { Video } from "@/lib/data";
 
-/** Miniatura 9:16 estilizada (no produto real: frame do vídeo). */
-export function VideoThumb({ hue, headline, className, playing, showPlay = true, size = "md" }:
-  { hue: number; headline?: string; className?: string; playing?: boolean; showPlay?: boolean; size?: "sm" | "md" | "lg" }) {
+/** Miniatura 9:16. Com `video` no modo real mostra a capa de verdade (quadro do próprio vídeo); a arte abaixo é só da demonstração. */
+export function VideoThumb({ hue, headline, className, playing, showPlay = true, size = "md", video }:
+  { hue: number; headline?: string; className?: string; playing?: boolean; showPlay?: boolean; size?: "sm" | "md" | "lg"; video?: Video }) {
+  if (modoReal && video) return <CapaReal video={video} className={className} showPlay={showPlay} size={size} />;
   const aviso = headline && /cuidado|falso/i.test(headline);
   return (
     <div

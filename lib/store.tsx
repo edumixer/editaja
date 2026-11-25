@@ -5,7 +5,7 @@ import { VIDEOS_INICIAIS, ETAPAS, type Video, type Status } from "./data";
 import { modoReal, supabase } from "./supabase";
 import { gerarComReferencias } from "./textos";
 import { textosSalvos } from "./textos-store";
-import { PRODUTOS_INICIAIS, type Produto } from "./produtos";
+import type { Produto } from "./produtos";
 
 type Ctx = {
   videos: Video[];
@@ -16,7 +16,9 @@ type Ctx = {
   aprovar: (id: string) => void;
   recusar: (id: string, comentario: string) => void;
   adicionar: (nome: string, mb: number) => string;
-  criarVideo: (nome: string, mb: number, produto: string, opcoes: Record<string, unknown>) => Promise<{ id: string; caminho: string }>;
+  criarVideo: (nome: string, mb: number, produto: string, opcoes: Record<string, unknown>) => Promise<{ id: string; caminho: string; owner: string }>;
+  /** Grava no vídeo o que a pessoa escolheu no envio (produto, estilo, headline…). Chamado ao tocar em "Editar". */
+  configurarVideo: (id: string, produto: { id: string; nome: string } | null, opcoes: Record<string, unknown>) => Promise<void>;
   enviarParaEdicao: (id: string) => Promise<void>;
   agendar: (id: string, quando: string) => void;
   publicarAgora: (id: string) => void;
@@ -28,7 +30,7 @@ const KEY = "editaja:videos:v1";
 
 /** Legenda, descrição e hashtags escritas no jeito das referências em "Ganchos e Legendas" (do produto primeiro). */
 export function gerarTextosIA(v: Video) {
-  let produtos: Produto[] = PRODUTOS_INICIAIS;
+  let produtos: Produto[] = [];
   try { const raw = localStorage.getItem("editaja:produtos:v1"); if (raw) produtos = JSON.parse(raw); } catch {}
   const produtoId = produtos.find((p) => p.nome === v.produto)?.id ?? null;
   const { legenda, descricao, hashtags } = gerarComReferencias(v, textosSalvos(), produtoId);
@@ -41,7 +43,7 @@ type Linha = {
   versao: number; duracao_bruto: number | null; duracao_final: number | null; stats: { cortes?: number; imagens?: number; sons?: number } | null;
   legenda: string | null; descricao: string | null; hashtags: string[] | null; agendado_para: string | null; created_at: string;
   opcoes: Record<string, unknown> | null; erro: string | null; comentarios?: { texto: string; created_at: string }[];
-  editado_path?: string | null; editado_em?: string | null; headline_ativa?: boolean; headline_x?: number | null; headline_y?: number | null; surpresas?: Video["surpresas"] | null;
+  editado_path?: string | null; editado_em?: string | null; bruto_path?: string | null; owner_id?: string; headline_ativa?: boolean; headline_x?: number | null; headline_y?: number | null; surpresas?: Video["surpresas"] | null;
 };
 function hueDe(id: string) { let h = 0; for (const c of id) h = (h * 31 + c.charCodeAt(0)) % 360; return h; }
 function paraVideo(l: Linha): Video {
@@ -56,7 +58,8 @@ function paraVideo(l: Linha): Video {
     surpresas: l.surpresas ?? undefined,
     comentarios: (l.comentarios ?? []).map((c) => ({ autor: "Você", texto: c.texto, quando: new Date(c.created_at).toLocaleString("pt-BR") })),
     // extras do modo real (lidos pela Aprovação via VideoReal em components/video-real.tsx)
-    ...{ editadoPath: l.editado_path ?? undefined, editadoEm: l.editado_em ?? undefined, erro: l.erro ?? undefined, statusBanco: l.status },
+    ...{ editadoPath: l.editado_path ?? undefined, editadoEm: l.editado_em ?? undefined, erro: l.erro ?? undefined, statusBanco: l.status,
+      brutoPath: l.bruto_path ?? undefined, ownerId: l.owner_id, capaPath: (l.opcoes as { capa?: string } | null)?.capa },
   } as Video;
 }
 const CAMPOS: Partial<Record<keyof Video, string>> = {
@@ -179,12 +182,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     },
     criarVideo: async (nome, mb, produto, opcoes) => {
       const { data, error } = await supabase!.from("videos")
-        .insert({ titulo: nome.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " "), produto, status: "enviando", opcoes: { ...opcoes, mb } })
+        .insert({ titulo: nome.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " "), produto: produto || null, status: "enviando", opcoes: { ...opcoes, mb } })
         .select("id, owner_id").single();
       if (error) throw error;
       const caminho = `${data.owner_id}/${data.id}/${nome.replace(/[^\w.\-]+/g, "_")}`;
       await supabase!.from("videos").update({ bruto_path: caminho }).eq("id", data.id);
-      return { id: data.id, caminho };
+      return { id: data.id, caminho, owner: data.owner_id };
+    },
+    configurarVideo: async (id, produto, opcoes) => {
+      if (!supabase) return;
+      const { data: atual } = await supabase.from("videos").select("opcoes").eq("id", id).maybeSingle();
+      const antes = (atual?.opcoes ?? {}) as Record<string, unknown>;
+      const { error } = await supabase.from("videos").update({
+        produto: produto?.nome ?? null, produto_id: produto?.id ?? null,
+        opcoes: { ...antes, ...opcoes, produto_id: produto?.id ?? null },
+      }).eq("id", id);
+      if (error) throw error;
     },
     agendar: (id, quando) => update(id, { status: "agendado", agendadoPara: quando }),
     publicarAgora: (id) => update(id, { status: "publicado", agendadoPara: new Date().toISOString() }),

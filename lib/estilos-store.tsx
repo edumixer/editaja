@@ -22,18 +22,22 @@ type Ctx = {
 
 const EstilosCtx = React.createContext<Ctx | null>(null);
 const KEY = "editaja:estilos:v2";   // v2: "uau" virou "reação de surpresa"
+const ex = (x: unknown) => /gr[eê]mio|gremista|camisa-\d/i.test(JSON.stringify(x));   // exemplos fictícios (Camisas do Grêmio)
 const agora = () => new Date().toLocaleString("pt-BR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 
 export function EstilosProvider({ children }: { children: React.ReactNode }) {
   const [estilos, setEstilos] = React.useState<Estilo[]>(ESTILOS_INICIAIS);
-  const [referencias, setReferencias] = React.useState<Referencia[]>(REFERENCIAS_INICIAIS);
-  const [sugestoes, setSugestoes] = React.useState<Sugestao[]>(SUGESTOES_INICIAIS);
+  const [referencias, setReferencias] = React.useState<Referencia[]>(REFERENCIAS_INICIAIS.filter((x) => !ex(x)));
+  const [sugestoes, setSugestoes] = React.useState<Sugestao[]>(SUGESTOES_INICIAIS.filter((x) => !ex(x)));
   const loaded = React.useRef(false);
 
   React.useEffect(() => {
     try {
       const raw = localStorage.getItem(KEY);
-      if (raw) { const d = JSON.parse(raw); setEstilos(d.estilos); setReferencias(d.referencias); setSugestoes(d.sugestoes); }
+      if (raw) {
+        const d = JSON.parse(raw);
+        setEstilos(d.estilos); setReferencias((d.referencias as Referencia[]).filter((x) => !ex(x))); setSugestoes((d.sugestoes as Sugestao[]).filter((x) => !ex(x)));
+      }
     } catch {}
     loaded.current = true;
   }, []);

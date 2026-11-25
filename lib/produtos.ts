@@ -10,7 +10,7 @@ export const ROTULOS: Record<Rotulo, { label: string; dica: string }> = {
   print: { label: "Print", dica: "Print de loja/avaliação, entra com o som de clique" },
 };
 
-export type ImagemProduto = { id: string; nome: string; rotulo: Rotulo; tamanho: string; hue: number; url?: string; origem: string };
+export type ImagemProduto = { id: string; nome: string; rotulo: Rotulo; tamanho: string; hue: number; url?: string; origem: string; caminho?: string };
 
 export type Produto = {
   id: string; nome: string; descricao: string; hue: number;
@@ -19,32 +19,11 @@ export type Produto = {
   pasta: string;                // de onde veio (pasta inicial) ou "enviado"
 };
 
-const img = (id: string, nome: string, rotulo: Rotulo, tamanho: string, hue: number, origem: string): ImagemProduto =>
-  ({ id, nome, rotulo, tamanho, hue, origem });
+/** Nenhum produto de exemplo: cada conta começa vazia e cadastra os próprios produtos (ficam salvos na conta). */
+export const PRODUTOS_INICIAIS: Produto[] = [];
 
-export const PRODUTOS_INICIAIS: Produto[] = [
-  { id: "camisas-gremio", nome: "Camisas do Grêmio", hue: 215, pasta: "biblioteca/camisas-gremio/",
-    descricao: "Camisas oficiais. Fotos enviadas pelo Eduardo.", palavras: ["camisa", "grêmio", "tricolor", "manto"],
-    imagens: [
-      img("cg1", "camisa-1.png", "produto", "190 KB", 210, "biblioteca/camisas-gremio/"),
-      img("cg2", "camisa-2.png", "detalhe", "128 KB", 215, "biblioteca/camisas-gremio/"),
-      img("cg3", "camisa-3.png", "original", "144 KB", 220, "biblioteca/camisas-gremio/"),
-    ] },
-  { id: "serum-facil", nome: "Sérum Facil", hue: 290, pasta: "biblioteca/serum-facil/",
-    descricao: "Sérum facial. Comparação original x falso.", palavras: ["sérum", "serum", "facil"],
-    imagens: [
-      img("sf1", "produto-serum.png", "original", "164 KB", 290, "biblioteca/serum-facil/"),
-      img("sf2", "falso-1.png", "falso", "56 KB", 0, "biblioteca/falsos-genericos/"),
-      img("sf3", "falso-2.png", "falso", "52 KB", 10, "biblioteca/falsos-genericos/"),
-    ] },
-  { id: "smartwatch", nome: "Smartwatch", hue: 165, pasta: "biblioteca/",
-    descricao: "Relógio inteligente (referência Garmin).", palavras: ["relógio", "smartwatch", "garmin"],
-    imagens: [img("sw1", "garmin_referencia.png", "produto", "250 KB", 165, "biblioteca/")] },
-  { id: "lisinha-clarinha", nome: "Lisinha e Clarinha", hue: 20, pasta: "enviado",
-    descricao: "Sem imagens ainda. Envie as fotos oficiais.", palavras: ["lisinha", "clarinha"], imagens: [] },
-  { id: "creme-celulite", nome: "Creme celulite e estria", hue: 340, pasta: "enviado",
-    descricao: "Sem imagens ainda. Envie as fotos oficiais.", palavras: ["creme", "celulite", "estria"], imagens: [] },
-];
+/** Ids dos produtos de exemplo que as versões antigas guardavam no navegador (não são importados para a conta). */
+export const IDS_EXEMPLO = ["camisas-gremio", "serum-facil", "smartwatch", "lisinha-clarinha", "creme-celulite"];
 
 /* ---------- hooks × CTAs ---------- */
 export type Trecho = { id: string; texto: string; s?: number; e?: number };

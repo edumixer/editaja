@@ -18,16 +18,21 @@ type Ctx = {
 const TextosCtx = React.createContext<Ctx | null>(null);
 const novoId = () => Math.random().toString(36).slice(2, 10);
 
+const EXEMPLO = /gr[eê]mio|gremista/i;   // exemplo fictício antigo: some também do que ficou salvo no navegador
+const PRODUTOS_EXEMPLO = ["camisas-gremio", "serum-facil", "smartwatch", "lisinha-clarinha", "creme-celulite"];
+const limpar = <T,>(v: T): T => (Array.isArray(v)
+  ? (v.filter((x) => !EXEMPLO.test(JSON.stringify(x)) && !PRODUTOS_EXEMPLO.includes((x as { produtoId?: string }).produtoId ?? "")) as T) : v);
+
 function usePersistente<T>(key: string, inicial: T) {
   const [v, setV] = React.useState<T>(inicial);
   const ok = React.useRef(false);
-  React.useEffect(() => { try { const raw = localStorage.getItem(key); if (raw) setV(JSON.parse(raw)); } catch {} ok.current = true; }, [key]);
+  React.useEffect(() => { try { const raw = localStorage.getItem(key); if (raw) setV(limpar(JSON.parse(raw))); } catch {} ok.current = true; }, [key]);
   React.useEffect(() => { if (ok.current) try { localStorage.setItem(key, JSON.stringify(v)); } catch {} }, [key, v]);
   return [v, setV] as const;
 }
 
 export function TextosProvider({ children }: { children: React.ReactNode }) {
-  const [textos, setTextos] = usePersistente<TextoRef[]>(KEY_TEXTOS, TEXTOS_INICIAIS);
+  const [textos, setTextos] = usePersistente<TextoRef[]>(KEY_TEXTOS, limpar(TEXTOS_INICIAIS));
   const [roteiros, setRoteiros] = usePersistente<Roteiro[]>(KEY_ROTEIROS, []);
   const value: Ctx = {
     textos, roteiros,
@@ -53,6 +58,6 @@ export function useTextos() {
 
 /** Lê a biblioteca salva (para quem não está dentro do React, como a geração de legenda na aprovação). */
 export function textosSalvos(): TextoRef[] {
-  try { const raw = localStorage.getItem(KEY_TEXTOS); if (raw) return JSON.parse(raw); } catch {}
-  return TEXTOS_INICIAIS;
+  try { const raw = localStorage.getItem(KEY_TEXTOS); if (raw) return limpar(JSON.parse(raw) as TextoRef[]); } catch {}
+  return limpar(TEXTOS_INICIAIS);
 }

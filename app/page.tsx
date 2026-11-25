@@ -10,11 +10,14 @@ import { useStore } from "@/lib/store";
 import { ETAPAS, fmtDur } from "@/lib/data";
 
 export default function Painel() {
-  const { videos } = useStore();
+  const { videos, modoReal, sessao } = useStore();
+  const nome = modoReal ? String(sessao?.user.user_metadata?.nome ?? "").split(" ")[0] : "Eduardo";
+  const editados = videos.filter((v) => v.duracaoFinal || ["aprovacao", "aprovado", "agendado", "publicado"].includes(v.status));
+  const mes = editados.filter((v) => new Date(v.criadoEm).getMonth() === new Date().getMonth()).length;
   const count = (s: string[]) => videos.filter((v) => s.includes(v.status)).length;
   const editando = videos.find((v) => v.status === "editando");
   const aprovacao = videos.filter((v) => v.status === "aprovacao");
-  const economizado = videos.filter((v) => v.duracaoFinal).length * 2;
+  const economizado = editados.length * 2;
 
   const funil = [
     { label: "Na fila", curto: "Fila", n: count(["fila", "recusado"]), icon: Clock, href: "/fila" },
@@ -31,9 +34,9 @@ export default function Painel() {
         <div className="pointer-events-none absolute -bottom-32 left-1/3 size-72 rounded-full bg-primary/20 blur-3xl" />
         <div className="relative flex flex-col gap-6 md:flex-row md:items-center md:justify-between">
           <div className="max-w-xl">
-            <p className="text-sm font-medium text-muted-foreground">Olá, Eduardo 👋</p>
+            <p className="text-sm font-medium text-muted-foreground">Olá{nome ? `, ${nome[0].toUpperCase()}${nome.slice(1).toLowerCase()}` : ""} 👋</p>
             <h1 className="mt-1 text-2xl font-bold tracking-tight sm:text-3xl">
-              {aprovacao.length > 0 ? <>Você tem <span className="brand-text">{aprovacao.length} vídeos</span> prontos para aprovar</> : "Tudo em dia por aqui"}
+              {aprovacao.length > 0 ? <>Você tem <span className="brand-text">{aprovacao.length} vídeo{aprovacao.length > 1 ? "s" : ""}</span> prontos para aprovar</> : "Tudo em dia por aqui"}
             </h1>
             <p className="mt-2 text-sm text-muted-foreground sm:text-base">
               Envie o bruto e o EditaJá corta respiros e repetições, acelera para 1.1x, coloca sons e imagens e gera a legenda. Você só aprova.
@@ -47,12 +50,17 @@ export default function Painel() {
       </section>
 
       <section className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        {[
+        {(modoReal ? [
+          { label: "Editados este mês", value: String(mes), hint: "vídeos prontos", icon: Film },
+          { label: "Horas economizadas", value: `${economizado}h`, hint: "≈ 2h por vídeo", icon: Zap },
+          { label: "Para aprovar", value: String(aprovacao.length), hint: "esperando você", icon: CheckCircle2 },
+          { label: "Na fila", value: String(count(["fila", "recusado", "editando"])), hint: "sendo editados", icon: TrendingUp },
+        ] : [
           { label: "Editados este mês", value: "23", hint: "+8 vs. mês passado", icon: Film },
           { label: "Horas economizadas", value: `${46 + economizado}h`, hint: "≈ 2h por vídeo", icon: Zap },
           { label: "Taxa de aprovação", value: "87%", hint: "na 1ª versão", icon: CheckCircle2 },
           { label: "Tempo médio de edição", value: "3m40s", hint: "vídeo de 2 min", icon: TrendingUp },
-        ].map((k) => (
+        ]).map((k) => (
           <Card key={k.label} className="p-4 sm:p-5">
             <div className="flex items-start justify-between">
               <p className="text-xs font-medium text-muted-foreground sm:text-sm">{k.label}</p>
@@ -94,7 +102,7 @@ export default function Painel() {
           <CardContent>
             {editando ? (
               <div className="flex gap-4">
-                <VideoThumb hue={editando.hue} headline={editando.headline} className="w-24 shrink-0" showPlay={false} />
+                <VideoThumb hue={editando.hue} headline={editando.headline} video={editando} className="w-24 shrink-0" showPlay={false} />
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-medium">{editando.titulo}</p>
                   <p className="text-xs text-muted-foreground">{editando.produto} · bruto {fmtDur(editando.duracaoBruto)}</p>
@@ -125,7 +133,7 @@ export default function Painel() {
             <div className="-mx-1 flex gap-3 overflow-x-auto px-1 pb-1 scrollbar-none">
               {videos.filter((v) => ["aprovacao", "aprovado", "agendado"].includes(v.status)).map((v) => (
                 <Link key={v.id} href={`/aprovacao/${v.id}`} className="group w-32 shrink-0 sm:w-36">
-                  <VideoThumb hue={v.hue} headline={v.headline} className="transition-transform group-hover:-translate-y-0.5 group-hover:shadow-lg" />
+                  <VideoThumb hue={v.hue} headline={v.headline} video={v} className="transition-transform group-hover:-translate-y-0.5 group-hover:shadow-lg" />
                   <p className="mt-2 line-clamp-2 text-xs font-medium leading-snug">{v.titulo}</p>
                   <div className="mt-1"><StatusBadge status={v.status} /></div>
                 </Link>

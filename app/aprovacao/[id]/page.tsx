@@ -20,7 +20,7 @@ import { supabase } from "@/lib/supabase";
 import { useEstilos } from "@/lib/estilos-store";
 import { Switch } from "@/components/ui/switch";
 import { PosicaoHeadline } from "@/components/headline-config";
-import { useVideoEditado, type VideoReal } from "@/components/video-real";
+import { useVideoEditado, quandoEditado, type VideoReal } from "@/components/video-real";
 
 function PlayerReal({ v: v0, owner }: { v: Video; owner: string }) {
   const v = v0 as VideoReal;

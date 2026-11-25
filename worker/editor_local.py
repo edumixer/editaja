@@ -17,6 +17,7 @@ Precisa do arquivo plataforma\\worker\\.env com:
 import os
 import pathlib
 import sys
+import threading
 import time
 import traceback
 import types
@@ -60,12 +61,24 @@ def pegar_proximo(db):
     return None
 
 
+def avisar_ligado(db):
+    """A cada 20 s grava a hora em config_robo.editor_visto_em: a tela "Fila de edição" mostra Ligado/Desligado."""
+    while True:
+        try:
+            agora = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+            db.table("config_robo").upsert({"chave": "editor_visto_em", "valor": agora}, on_conflict="chave").execute()
+        except Exception as e:  # sem internet por um instante: tenta de novo no próximo ciclo
+            print("aviso: não consegui avisar que estou ligado:", e)
+        time.sleep(20)
+
+
 def main():
     if not os.environ.get("SUPABASE_URL") or not os.environ.get("SUPABASE_SERVICE_ROLE_KEY"):
         sys.exit("Falta o arquivo .env com SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY (veja o topo deste arquivo).")
     if not (pathlib.Path(os.environ["EDITOR_DIR"]) / "editor.py").exists():
         sys.exit(f"Não achei o editor.py em {os.environ['EDITOR_DIR']}. Ajuste EDITOR_DIR no .env.")
     db = modal_app._db()
+    threading.Thread(target=avisar_ligado, args=(db,), daemon=True).start()
     print("EditaJá: editor local ligado. Deixe esta janela aberta. (Ctrl+C para parar)")
     while True:
         try:

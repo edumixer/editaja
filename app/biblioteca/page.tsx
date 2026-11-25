@@ -15,9 +15,12 @@ import { Switch } from "@/components/ui/switch";
 import { Input, Label } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { PASTAS } from "@/lib/data";
+import { PASTAS, type Arquivo, type Video } from "@/lib/data";
+import { VideoThumb } from "@/components/video-thumb";
 import { useStore } from "@/lib/store";
 import { enviarRetomavel } from "@/lib/upload";
+import { supabase } from "@/lib/supabase";
+import { capturarCapa } from "@/components/capa-video";
 import { useEstilos } from "@/lib/estilos-store";
 import { useProdutos } from "@/lib/produtos-store";
 import { HooksCtas, type Combinacoes } from "@/components/hooks-ctas";
@@ -28,16 +31,20 @@ import { cn } from "@/lib/utils";
 
 const ICONES: Record<string, React.ElementType> = { film: Film, scissors: Scissors, send: Send, sparkles: Sparkles, image: ImageIcon, music: Music };
 
-type Envio = { id: string; nome: string; mb: number; enviado: number; pausado: boolean; feito: boolean; velocidade: number; arquivo?: File; erro?: string };
+type Envio = { id: string; nome: string; mb: number; enviado: number; pausado: boolean; feito: boolean; velocidade: number; arquivo?: File; erro?: string; videoId?: string; naFila?: boolean };
 
 function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
-  const { adicionar, modoReal, criarVideo, enviarParaEdicao, update } = useStore();
+  const { adicionar, modoReal, criarVideo, configurarVideo, enviarParaEdicao, update } = useStore();
   const tus = React.useRef<Record<string, TusUpload>>({});
   const router = useRouter();
   const [envios, setEnvios] = React.useState<Envio[]>([]);
   const { produtos } = useProdutos();
-  const [produtoId, setProdutoId] = React.useState(produtos[0]?.id ?? "");
+  const [produtoId, setProdutoId] = React.useState("");
   const prod = produtos.find((x) => x.id === produtoId);
+  // escolhas feitas no envio; valem para os vídeos quando a pessoa toca em "Editar" (também para os que ainda estão subindo)
+  const escolhas = React.useRef<{ produto: { id: string; nome: string } | null; opcoes: Record<string, unknown> } | null>(null);
+  const pendentes = React.useRef<Set<string>>(new Set());   // envios já mandados para a fila, esperando terminar de subir
+  const videoDe = React.useRef<Record<string, { id: string; capa?: Promise<string | undefined> }>>({});
   const produto = prod?.nome ?? "";
   const { estilos } = useEstilos();
   const [estiloId, setEstiloId] = React.useState("clean");
@@ -61,9 +68,29 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
 
   const patch = (id: string, p: Partial<Envio>) => setEnvios((es) => es.map((x) => (x.id === id ? { ...x, ...p } : x)));
 
+  /** Grava as escolhas no vídeo (produto certo, estilo, headline, capa) e só então põe na fila de edição. */
+  const mandarVideo = async (envioId: string) => {
+    const v = videoDe.current[envioId], esc = escolhas.current;
+    if (!v || !esc) return;
+    const capa = await v.capa;
+    await configurarVideo(v.id, esc.produto, { ...esc.opcoes, ...(capa ? { capa } : {}) });
+    await enviarParaEdicao(v.id);
+    setEnvios((es) => es.filter((x) => x.id !== envioId || !x.feito).map((x) => (x.id === envioId ? { ...x, naFila: true } : x)));
+  };
+
   const iniciarReal = async (e: Envio) => {
     try {
-      const { id, caminho } = await criarVideo(e.nome, e.mb, produto, { surpresa: unboxing, estilo_id: estiloId, produto_id: produtoId, combinacoes: comb, headline });
+      // o vídeo nasce "enviando", sem produto: o produto e as opções entram quando a pessoa toca em "Editar"
+      const { id, caminho, owner } = await criarVideo(e.nome, e.mb, "", {});
+      // capa de verdade: uma foto de um quadro do próprio vídeo (se o navegador conseguir abrir o formato)
+      const capa = capturarCapa(e.arquivo!).then(async (b) => {
+        if (!b) return undefined;
+        const alvo = `${owner}/${id}/capa.jpg`;
+        const { error } = await supabase!.storage.from("brutos").upload(alvo, b, { contentType: "image/jpeg", upsert: true });
+        return error ? undefined : alvo;
+      }).catch(() => undefined);
+      videoDe.current[e.id] = { id, capa };
+      patch(e.id, { videoId: id });
       let ultimo = { t: Date.now(), b: 0 };
       tus.current[e.id] = await enviarRetomavel(e.arquivo!, caminho, {
         progresso: (b) => {
@@ -72,7 +99,7 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
           if (dt > 0.5) ultimo = { t: agora, b };
           patch(e.id, { enviado: b / 1e6, ...(vel != null ? { velocidade: vel } : {}) });
         },
-        ok: async () => { patch(e.id, { feito: true, enviado: e.mb }); await enviarParaEdicao(id); },
+        ok: async () => { patch(e.id, { feito: true, enviado: e.mb }); if (pendentes.current.has(e.id)) { pendentes.current.delete(e.id); await mandarVideo(e.id); } },
         erro: (err) => patch(e.id, { erro: err.message, pausado: true }),
       });
     } catch (err) { patch(e.id, { erro: (err as Error).message, pausado: true }); }
@@ -93,16 +120,28 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
   };
 
   const exemplo = () => addFiles([{ name: "creme_noite_bruto.mp4", size: 860e6 }, { name: "fone_bluetooth_unboxing.mov", size: 1.4e9 }]);
-  const prontos = envios.filter((e) => e.feito);
+  const prontos = envios.filter((e) => e.feito && !e.naFila);
+  const subindo = modoReal ? envios.filter((e) => !e.feito && e.videoId && !e.erro && !pendentes.current.has(e.id)) : [];
+  const paraEditar = [...prontos, ...subindo];
 
-  const mandarParaFila = () => {
+  const mandarParaFila = async () => {
+    if (modoReal) {
+      escolhas.current = {
+        produto: prod ? { id: prod.id, nome: prod.nome } : null,
+        opcoes: { surpresa: unboxing, estilo_id: estiloId, combinacoes: comb, headline },
+      };
+      try {
+        await Promise.all(prontos.map((e) => mandarVideo(e.id)));
+        subindo.forEach((e) => pendentes.current.add(e.id));
+      } catch (err) { toast.error("Não deu para pôr na fila", { description: (err as Error).message }); return; }
+    }
     if (!modoReal) prontos.forEach((e) => {
       const id = adicionar(e.nome, e.mb);
       if (headline.modo === "sem") update(id, { headlineAtiva: false });
       else if (headline.modo === "manual" && headline.texto.trim()) update(id, { headline: headline.texto.trim(), headlinePos: { x: headline.x, y: headline.y } });
     });
     const n = comb.automatico ? 0 : Math.max(1, comb.hooks.filter((x) => x.texto.trim()).length) * Math.max(1, comb.ctas.filter((x) => x.texto.trim()).length);
-    toast.success(`${prontos.length} vídeo(s) na fila de edição`, { description: n > 1 ? `Cada bruto vira ${n} vídeos (ganchos × CTAs). Você recebe um aviso quando estiverem prontos.` : "Você recebe um aviso quando estiverem prontos para aprovar." });
+    toast.success(`${paraEditar.length} vídeo(s) na fila de edição${prod ? ` · ${prod.nome}` : ""}`, { description: subindo.length ? "Os que ainda estão subindo entram na fila assim que terminarem. Deixe esta aba aberta até lá." : n > 1 ? `Cada bruto vira ${n} vídeos (ganchos × CTAs). Você recebe um aviso quando estiverem prontos.` : "Você recebe um aviso quando estiverem prontos para aprovar." });
     setEnvios((es) => es.filter((e) => !e.feito));
     onOpenChange(false);
     router.push("/fila");
@@ -178,12 +217,13 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
           <div className="grid gap-2">
             <div className="flex items-center justify-between"><Label>Produto</Label><Link href="/produtos" className="text-xs font-medium text-primary hover:underline">Gerenciar produtos</Link></div>
             <div className="flex flex-wrap gap-1.5">
+              <button onClick={() => setProdutoId("")} className={cn("rounded-full border px-3 py-1.5 text-xs font-medium transition-colors", produtoId === "" ? "border-primary bg-primary text-primary-foreground" : "bg-card hover:bg-accent")}>Sem produto</button>
               {produtos.map((p) => (
                 <button key={p.id} onClick={() => setProdutoId(p.id)} className={cn("rounded-full border px-3 py-1.5 text-xs font-medium transition-colors", produtoId === p.id ? "border-primary bg-primary text-primary-foreground" : "bg-card hover:bg-accent")}>{p.nome} · {p.imagens.length}</button>
               ))}
               <Link href="/produtos" className="rounded-full border border-dashed px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent">+ Novo produto</Link>
             </div>
-            <p className="text-xs text-muted-foreground">{prod && prod.imagens.length === 0 ? "Este produto ainda não tem imagens: o vídeo sai sem sobreposições. Envie em Produtos." : "O editor usa só as imagens deste produto quando a pessoa aponta ou fala dele."}</p>
+            <p className="text-xs text-muted-foreground">{!prod ? (produtos.length === 0 ? "Você ainda não cadastrou produtos. O vídeo sai sem imagens de referência; cadastre em Produtos." : "Sem produto: o vídeo sai sem imagens de referência.") : prod.imagens.length === 0 ? "Este produto ainda não tem imagens: o vídeo sai sem sobreposições. Envie em Produtos." : "O editor usa só as imagens deste produto quando a pessoa aponta ou fala dele."}</p>
           </div>
           <HooksCtas produto={produto} value={comb} onChange={setComb} />
           <div className="grid gap-2">
@@ -201,8 +241,8 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Continuar em segundo plano</Button>
-          <Button variant="brand" disabled={prontos.length === 0} onClick={mandarParaFila}>
-            <Scissors /> Editar {prontos.length > 0 ? `${prontos.length} vídeo${prontos.length > 1 ? "s" : ""}` : ""}
+          <Button variant="brand" disabled={paraEditar.length === 0} onClick={mandarParaFila}>
+            <Scissors /> Editar {paraEditar.length > 0 ? `${paraEditar.length} vídeo${paraEditar.length > 1 ? "s" : ""}` : ""}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -240,14 +280,43 @@ function FileTile({ a }: { a: (typeof PASTAS)[number]["arquivos"][number] }) {
   );
 }
 
+/** Modo real: as pastas mostram os vídeos da conta (nada de arquivos de exemplo). */
+function pastasReais(videos: Video[]) {
+  const arq = (v: Video): Arquivo & { video: Video } => ({
+    nome: v.titulo, tipo: "video", hue: v.hue, video: v,
+    tamanho: v.tamanhoMb ? `${v.tamanhoMb} MB` : "—",
+    quando: new Date(v.criadoEm).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }),
+  });
+  const editado = (v: Video) => !!(v as Video & { editadoPath?: string }).editadoPath;
+  return [
+    { id: "brutos", nome: "Brutos", icone: "film", descricao: "Vídeos que você enviou", arquivos: videos.filter((v) => !(v as Video & { origemId?: string }).origemId).map(arq) },
+    { id: "editados", nome: "Editados", icone: "scissors", descricao: "Prontos ou já aprovados", arquivos: videos.filter(editado).map(arq) },
+    { id: "publicados", nome: "Publicados", icone: "send", descricao: "Já foram para o ar", arquivos: videos.filter((v) => v.status === "publicado").map(arq) },
+  ];
+}
+
+function TileReal({ a, onClick }: { a: Arquivo & { video: Video }; onClick: () => void }) {
+  return (
+    <Card className="group overflow-hidden p-0 transition-shadow hover:shadow-md">
+      <button type="button" onClick={onClick} className="block w-full"><VideoThumb hue={a.hue} video={a.video} className="rounded-none" /></button>
+      <div className="p-3">
+        <p className="truncate text-xs font-medium" title={a.nome}>{a.nome}</p>
+        <p className="mt-0.5 text-[11px] text-muted-foreground">{a.tamanho} · {a.quando}</p>
+      </div>
+    </Card>
+  );
+}
+
 function Biblioteca() {
   const params = useSearchParams();
   const router = useRouter();
+  const { videos, modoReal } = useStore();
   const [pasta, setPasta] = React.useState("brutos");
   const [modo, setModo] = React.useState<"grid" | "lista">("grid");
   const [open, setOpen] = React.useState(false);
   React.useEffect(() => { if (params.get("upload")) setOpen(true); }, [params]);
-  const atual = PASTAS.find((p) => p.id === pasta)!;
+  const PASTAS_V = modoReal ? pastasReais(videos) : PASTAS;
+  const atual = PASTAS_V.find((p) => p.id === pasta) ?? PASTAS_V[0];
 
   return (
     <>
@@ -258,7 +327,7 @@ function Biblioteca() {
         </>} />
 
       <div className="-mx-4 mb-5 flex gap-2 overflow-x-auto px-4 pb-1 scrollbar-none sm:mx-0 sm:px-0">
-        {PASTAS.map((p) => {
+        {PASTAS_V.map((p) => {
           const Icon = ICONES[p.icone];
           return (
             <button key={p.id} onClick={() => setPasta(p.id)}
@@ -280,15 +349,15 @@ function Biblioteca() {
 
       {modo === "grid" ? (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6">
-          {atual.arquivos.map((a) => <FileTile key={a.nome} a={a} />)}
+          {atual.arquivos.map((a, i) => ("video" in a ? <TileReal key={(a as { video: Video }).video.id} a={a as Arquivo & { video: Video }} onClick={() => router.push((a as { video: Video & { editadoPath?: string } }).video.editadoPath ? `/aprovacao/${(a as { video: Video }).video.id}` : "/fila")} /> : <FileTile key={a.nome + i} a={a} />))}
           <button onClick={() => setOpen(true)} className="flex min-h-40 flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed text-sm text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground">
             <CloudUpload className="size-6" /> Adicionar
           </button>
         </div>
       ) : (
         <Card className="divide-y p-0">
-          {atual.arquivos.map((a) => (
-            <div key={a.nome} className="flex items-center gap-3 px-4 py-3">
+          {atual.arquivos.map((a, i) => (
+            <div key={a.nome + i} className="flex items-center gap-3 px-4 py-3">
               <div className="size-10 shrink-0 rounded-lg" style={{ backgroundImage: `linear-gradient(160deg, oklch(0.6 0.15 ${a.hue}), oklch(0.3 0.08 ${a.hue}))` }} />
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium">{a.nome}</p>
