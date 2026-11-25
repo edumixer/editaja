@@ -8,7 +8,7 @@ Fluxo:  app (Next.js) --POST /editar {video_id}--> este worker
 
 Deploy (uma vez, no Windows): rode ligar-na-nuvem.bat (pacote editaja-nuvem.zip). Ele faz:
     pip install modal ; python -m modal setup
-    python -m modal secret create editaja-supabase --from-dotenv ../.env   (SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    python -m modal secret create SUPABASE --from-dotenv ../.env   (SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     python -m modal deploy modal_app.py
 Depois disso a função "vigiar" roda sozinha a cada 1 min: pega a fila e edita, sem o PC ligado.
 Opcional: EDITAJA_WORKER_URL (endpoint "enfileirar") + EDITAJA_WORKER_TOKEN na Vercel para começar na hora.
@@ -39,7 +39,7 @@ image = (
 )
 
 app = modal.App("editaja-worker", image=image)
-secret = modal.Secret.from_name("editaja-supabase")
+secret = modal.Secret.from_name("SUPABASE")  # secret criado no site do Modal com esse nome
 
 ETAPAS = ["upload", "transcricao", "cortes", "velocidade", "sons", "imagens", "render"]
 
