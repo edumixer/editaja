@@ -45,7 +45,6 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
   const escolhas = React.useRef<{ produto: { id: string; nome: string } | null; opcoes: Record<string, unknown> } | null>(null);
   const pendentes = React.useRef<Set<string>>(new Set());   // envios já mandados para a fila, esperando terminar de subir
   const videoDe = React.useRef<Record<string, { id: string; capa?: Promise<string | undefined> }>>({});
-  const produto = prod?.nome ?? "";
   const { estilos } = useEstilos();
   const [estiloId, setEstiloId] = React.useState("clean");
   const [unboxing, setUnboxing] = React.useState(false);
@@ -123,12 +122,17 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
   const prontos = envios.filter((e) => e.feito && !e.naFila);
   const subindo = modoReal ? envios.filter((e) => !e.feito && e.videoId && !e.erro && !pendentes.current.has(e.id)) : [];
   const paraEditar = [...prontos, ...subindo];
+  // prévia de ganchos/CTAs: lê a fala do vídeo enviado (com vários vídeos, cada um é lido na hora de editar)
+  const ativos = envios.filter((e) => !e.naFila);
+  const unico = ativos.length === 1 ? ativos[0] : null;
+  const varios = ativos.length > 1;
+  const combFinal: Combinacoes = varios ? { automatico: true, hooks: [], ctas: [] } : comb;
 
   const mandarParaFila = async () => {
     if (modoReal) {
       escolhas.current = {
         produto: prod ? { id: prod.id, nome: prod.nome } : null,
-        opcoes: { surpresa: unboxing, estilo_id: estiloId, combinacoes: comb, headline },
+        opcoes: { surpresa: unboxing, estilo_id: estiloId, combinacoes: combFinal, headline },
       };
       try {
         await Promise.all(prontos.map((e) => mandarVideo(e.id)));
@@ -140,7 +144,7 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
       if (headline.modo === "sem") update(id, { headlineAtiva: false });
       else if (headline.modo === "manual" && headline.texto.trim()) update(id, { headline: headline.texto.trim(), headlinePos: { x: headline.x, y: headline.y } });
     });
-    const n = comb.automatico ? 0 : Math.max(1, comb.hooks.filter((x) => x.texto.trim()).length) * Math.max(1, comb.ctas.filter((x) => x.texto.trim()).length);
+    const n = combFinal.automatico ? 0 : Math.max(1, combFinal.hooks.filter((x) => x.texto.trim()).length) * Math.max(1, combFinal.ctas.filter((x) => x.texto.trim()).length);
     toast.success(`${paraEditar.length} vídeo(s) na fila de edição${prod ? ` · ${prod.nome}` : ""}`, { description: subindo.length ? "Os que ainda estão subindo entram na fila assim que terminarem. Deixe esta aba aberta até lá." : n > 1 ? `Cada bruto vira ${n} vídeos (ganchos × CTAs). Você recebe um aviso quando estiverem prontos.` : "Você recebe um aviso quando estiverem prontos para aprovar." });
     setEnvios((es) => es.filter((e) => !e.feito));
     onOpenChange(false);
@@ -225,7 +229,7 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
             </div>
             <p className="text-xs text-muted-foreground">{!prod ? (produtos.length === 0 ? "Você ainda não cadastrou produtos. O vídeo sai sem imagens de referência; cadastre em Produtos." : "Sem produto: o vídeo sai sem imagens de referência.") : prod.imagens.length === 0 ? "Este produto ainda não tem imagens: o vídeo sai sem sobreposições. Envie em Produtos." : "O editor usa só as imagens deste produto quando a pessoa aponta ou fala dele."}</p>
           </div>
-          <HooksCtas produto={produto} value={comb} onChange={setComb} />
+          <HooksCtas value={combFinal} onChange={setComb} videoId={unico?.feito ? unico.videoId : null} varios={varios} enviando={!!unico && !unico.feito} />
           <div className="grid gap-2">
             <Label>Texto na tela (headline)</Label>
             <HeadlineConfig value={headline} onChange={setHeadline} />
@@ -295,15 +299,64 @@ function pastasReais(videos: Video[]) {
   ];
 }
 
-function TileReal({ a, onClick }: { a: Arquivo & { video: Video }; onClick: () => void }) {
+function TileReal({ a, onClick, onExcluir }: { a: Arquivo & { video: Video }; onClick: () => void; onExcluir: () => void }) {
   return (
-    <Card className="group overflow-hidden p-0 transition-shadow hover:shadow-md">
+    <Card className="group relative overflow-hidden p-0 transition-shadow hover:shadow-md">
       <button type="button" onClick={onClick} className="block w-full"><VideoThumb hue={a.hue} video={a.video} className="rounded-none" /></button>
+      <DropdownMenu>
+        <DropdownMenuTrigger aria-label="Opções do vídeo" className="absolute right-2 top-2 grid size-8 place-items-center rounded-md bg-black/40 text-white backdrop-blur transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100 data-[state=open]:opacity-100"><MoreHorizontal className="size-4" /></DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onSelect={onClick}><Play /> Abrir</DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onSelect={onExcluir} className="text-destructive data-[highlighted]:text-destructive"><Trash2 /> Excluir</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
       <div className="p-3">
         <p className="truncate text-xs font-medium" title={a.nome}>{a.nome}</p>
         <p className="mt-0.5 text-[11px] text-muted-foreground">{a.tamanho} · {a.quando}</p>
       </div>
     </Card>
+  );
+}
+
+/** Confirmação antes de apagar: some da conta e do armazenamento, sem volta. */
+function ExcluirDialog({ video, onClose }: { video: (Video & { origemId?: string; statusBanco?: string }) | null; onClose: () => void }) {
+  const { videos, excluirVideo } = useStore();
+  const [apagando, setApagando] = React.useState(false);
+  const versoes = video ? videos.filter((v) => (v as Video & { origemId?: string }).origemId === video.id).length : 0;
+  const editando = video?.statusBanco === "editando";
+  const confirmar = async () => {
+    if (!video) return;
+    setApagando(true);
+    try {
+      await excluirVideo(video.id);
+      toast.success("Vídeo excluído", { description: versoes ? `As ${versoes} versões dele também foram apagadas.` : undefined });
+      onClose();
+    } catch (e) {
+      toast.error("Não deu para excluir", { description: (e as Error).message });
+    } finally { setApagando(false); }
+  };
+  return (
+    <Dialog open={!!video} onOpenChange={(o) => { if (!o && !apagando) onClose(); }}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Excluir “{video?.titulo}”?</DialogTitle>
+          <DialogDescription>
+            O vídeo bruto, o editado e a capa são apagados da sua conta para sempre. Não dá para desfazer.
+          </DialogDescription>
+        </DialogHeader>
+        {(versoes > 0 || editando) && (
+          <div className="grid gap-1.5 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs">
+            {versoes > 0 && <p>Este vídeo tem <b>{versoes} {versoes === 1 ? "versão" : "versões"}</b> (ganchos × CTAs) que também serão excluídas.</p>}
+            {editando && <p>Ele está sendo editado agora. A edição será descartada.</p>}
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="outline" disabled={apagando} onClick={onClose}>Cancelar</Button>
+          <Button variant="destructive" disabled={apagando} onClick={confirmar}><Trash2 /> {apagando ? "Excluindo…" : "Excluir"}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -314,6 +367,8 @@ function Biblioteca() {
   const [pasta, setPasta] = React.useState("brutos");
   const [modo, setModo] = React.useState<"grid" | "lista">("grid");
   const [open, setOpen] = React.useState(false);
+  const [apagar, setApagar] = React.useState<Video | null>(null);
+  const abrir = (v: Video & { editadoPath?: string }) => router.push(v.editadoPath ? `/aprovacao/${v.id}` : "/fila");
   React.useEffect(() => { if (params.get("upload")) setOpen(true); }, [params]);
   const PASTAS_V = modoReal ? pastasReais(videos) : PASTAS;
   const atual = PASTAS_V.find((p) => p.id === pasta) ?? PASTAS_V[0];
@@ -349,7 +404,7 @@ function Biblioteca() {
 
       {modo === "grid" ? (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6">
-          {atual.arquivos.map((a, i) => ("video" in a ? <TileReal key={(a as { video: Video }).video.id} a={a as Arquivo & { video: Video }} onClick={() => router.push((a as { video: Video & { editadoPath?: string } }).video.editadoPath ? `/aprovacao/${(a as { video: Video }).video.id}` : "/fila")} /> : <FileTile key={a.nome + i} a={a} />))}
+          {atual.arquivos.map((a, i) => ("video" in a ? <TileReal key={(a as { video: Video }).video.id} a={a as Arquivo & { video: Video }} onClick={() => abrir((a as { video: Video }).video)} onExcluir={() => setApagar((a as { video: Video }).video)} /> : <FileTile key={a.nome + i} a={a} />))}
           <button onClick={() => setOpen(true)} className="flex min-h-40 flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed text-sm text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground">
             <CloudUpload className="size-6" /> Adicionar
           </button>
@@ -363,12 +418,22 @@ function Biblioteca() {
                 <p className="truncate text-sm font-medium">{a.nome}</p>
                 <p className="text-xs text-muted-foreground">{a.tamanho} · {a.quando}</p>
               </div>
-              <Button variant="ghost" size="icon-sm"><MoreHorizontal /></Button>
+              {"video" in a ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger aria-label="Opções do vídeo" className="grid size-8 place-items-center rounded-md hover:bg-accent"><MoreHorizontal className="size-4" /></DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onSelect={() => abrir((a as { video: Video }).video)}><Play /> Abrir</DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onSelect={() => setApagar((a as { video: Video }).video)} className="text-destructive data-[highlighted]:text-destructive"><Trash2 /> Excluir</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : <Button variant="ghost" size="icon-sm"><MoreHorizontal /></Button>}
             </div>
           ))}
         </Card>
       )}
 
+      <ExcluirDialog video={apagar} onClose={() => setApagar(null)} />
       <UploadDialog open={open} onOpenChange={(o) => { setOpen(o); if (!o && params.get("upload")) router.replace("/biblioteca"); }} />
     </>
   );

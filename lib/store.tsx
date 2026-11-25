@@ -20,6 +20,8 @@ type Ctx = {
   /** Grava no vídeo o que a pessoa escolheu no envio (produto, estilo, headline…). Chamado ao tocar em "Editar". */
   configurarVideo: (id: string, produto: { id: string; nome: string } | null, opcoes: Record<string, unknown>) => Promise<void>;
   enviarParaEdicao: (id: string) => Promise<void>;
+  /** Apaga o vídeo (e as versões ganchos × CTAs dele) do banco e os arquivos do armazenamento. */
+  excluirVideo: (id: string) => Promise<void>;
   agendar: (id: string, quando: string) => void;
   publicarAgora: (id: string) => void;
   reset: () => void;
@@ -43,7 +45,7 @@ type Linha = {
   versao: number; duracao_bruto: number | null; duracao_final: number | null; stats: { cortes?: number; imagens?: number; sons?: number } | null;
   legenda: string | null; descricao: string | null; hashtags: string[] | null; agendado_para: string | null; created_at: string;
   opcoes: Record<string, unknown> | null; erro: string | null; comentarios?: { texto: string; created_at: string }[];
-  editado_path?: string | null; editado_em?: string | null; bruto_path?: string | null; owner_id?: string; headline_ativa?: boolean; headline_x?: number | null; headline_y?: number | null; surpresas?: Video["surpresas"] | null;
+  editado_path?: string | null; editado_em?: string | null; origem_id?: string | null; bruto_path?: string | null; owner_id?: string; headline_ativa?: boolean; headline_x?: number | null; headline_y?: number | null; surpresas?: Video["surpresas"] | null;
 };
 function hueDe(id: string) { let h = 0; for (const c of id) h = (h * 31 + c.charCodeAt(0)) % 360; return h; }
 function paraVideo(l: Linha): Video {
@@ -59,7 +61,7 @@ function paraVideo(l: Linha): Video {
     comentarios: (l.comentarios ?? []).map((c) => ({ autor: "Você", texto: c.texto, quando: new Date(c.created_at).toLocaleString("pt-BR") })),
     // extras do modo real (lidos pela Aprovação via VideoReal em components/video-real.tsx)
     ...{ editadoPath: l.editado_path ?? undefined, editadoEm: l.editado_em ?? undefined, erro: l.erro ?? undefined, statusBanco: l.status,
-      brutoPath: l.bruto_path ?? undefined, ownerId: l.owner_id, capaPath: (l.opcoes as { capa?: string } | null)?.capa },
+      brutoPath: l.bruto_path ?? undefined, ownerId: l.owner_id, origemId: l.origem_id ?? undefined, capaPath: (l.opcoes as { capa?: string } | null)?.capa },
   } as Video;
 }
 const CAMPOS: Partial<Record<keyof Video, string>> = {
@@ -198,6 +200,28 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         opcoes: { ...antes, ...opcoes, produto_id: produto?.id ?? null },
       }).eq("id", id);
       if (error) throw error;
+    },
+    excluirVideo: async (id) => {
+      type Extra = Video & { origemId?: string; ownerId?: string };
+      const lista = videos as Extra[];
+      const ids = [id, ...lista.filter((v) => v.origemId === id).map((v) => v.id)];
+      const owner = lista.find((v) => v.id === id)?.ownerId;
+      setVideos((vs) => vs.filter((v) => !ids.includes(v.id)));
+      if (!supabase) return;
+      try {
+        if (owner) {
+          // arquivos: brutos/<dono>/<id>/… (bruto, capa, transcrição) e editados/<dono>/<id>/… de cada versão.
+          // Uma versão (gancho × CTA) usa o bruto do original: só some junto com o original.
+          for (const bucket of ["brutos", "editados"]) for (const vid of ids) {
+            const pasta = `${owner}/${vid}`;
+            const { data } = await supabase.storage.from(bucket).list(pasta, { limit: 1000 });
+            const caminhos = (data ?? []).map((f) => `${pasta}/${f.name}`);
+            if (caminhos.length) await supabase.storage.from(bucket).remove(caminhos);
+          }
+        }
+        const { error } = await supabase.from("videos").delete().eq("id", id);   // versões filhas saem junto (cascade)
+        if (error) throw error;
+      } catch (e) { await recarregar(); throw e; }
     },
     agendar: (id, quando) => update(id, { status: "agendado", agendadoPara: quando }),
     publicarAgora: (id) => update(id, { status: "publicado", agendadoPara: new Date().toISOString() }),

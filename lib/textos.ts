@@ -99,11 +99,11 @@ export function gerarComReferencias(v: { produto: string; headline: string }, te
   const legenda = `${gancho.charAt(0).toUpperCase()}${gancho.slice(1)}${pergunta}${emoji}`.trim();
 
   const baseDesc = des[0]?.texto.split(/(?<=[.!?])\s+/)[0];
-  const cta = ctas[0]?.texto ?? "Comenta EU QUERO que eu te mando o link";
+  const cta = ctas[0]?.texto;   // só CTA que a pessoa cadastrou; nada inventado
   const descricao = [
     aviso ? `Antes de comprar ${v.produto}, confira estes detalhes.` : `Testei ${v.produto} e te conto tudo.`,
     baseDesc && !baseDesc.includes(v.produto) ? baseDesc.replace(/^(Testei|Manto|Mostrei)\b.*$/i, "").trim() : "",
-    `${cta}.`,
+    cta ? `${cta}.` : "",
   ].filter(Boolean).join(" ").replace(/\.\./g, ".");
 
   const qtd = Math.max(4, Math.min(8, analisarEstrutura(hs).hashtagsPorPost || 5));

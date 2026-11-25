@@ -182,7 +182,7 @@ begin
   if exists (select 1 from public.estilos where owner_id = p_owner) then return; end if;
 
   insert into public.estilos (owner_id, slug, nome, descricao, padrao)
-  values (p_owner, 'clean', 'Clean do Eduardo', 'Cortes secos, 1.1x, imagens onde aponta, sons fixos. Sem cards nem animações.', true)
+  values (p_owner, 'clean', 'Clean', 'Cortes secos, 1.1x, imagens onde aponta, sons fixos. Sem cards nem animações.', true)
   returning id into v_clean;
   insert into public.estilos (owner_id, slug, nome, descricao)
   values (p_owner, 'unboxing', 'Unboxing UAU', 'Opcional por vídeo: o melhor UAU abre o vídeo, depois o gancho falado.')
@@ -196,11 +196,11 @@ begin
      "sons":{"foto_entra":"Bubble pop","clica":"mouse-click","print_sozinho":"mouse-click","criar_sons":false},
      "uau_no_inicio":false,"proibido":["botoes","cards","cta_carrinho","clique_aqui","loja_oficial","animacoes_extras"]}',
    '[{"id":"r1","texto":"Todo vídeo abre com 0,1 s de capa","tipo":"fixa","origem":"COMO-USAR.md"},
-     {"id":"r2","texto":"Velocidade 1.1x em todo vídeo exportado","tipo":"fixa","origem":"Pedido do Eduardo"},
+     {"id":"r2","texto":"Velocidade 1.1x em todo vídeo exportado","tipo":"fixa","origem":"Regra padrão"},
      {"id":"r3","texto":"Cortes secos de respiros e repetições, mantendo a última","tipo":"fixa","origem":"estilo-referencia.md"},
      {"id":"r4","texto":"Nunca cortar o fim de sílabas/frases","tipo":"fixa","origem":"Recusa aprendida"},
      {"id":"r5","texto":"Qualidade original: resolução, cor e saturação","tipo":"fixa","origem":"Recusa aprendida"},
-     {"id":"r6","texto":"Headline com 🚨 quando falar \"cuidado\"","tipo":"fixa","origem":"Pedido do Eduardo"},
+     {"id":"r6","texto":"Headline com 🚨 quando falar \"cuidado\"","tipo":"fixa","origem":"Regra padrão"},
      {"id":"r7","texto":"Imagens levemente inclinadas, sem animação, onde a pessoa aponta","tipo":"fixa","origem":"referencia_imagens_inclinadas.mov"},
      {"id":"r8","texto":"Bubble pop em cada foto; mouse-click em clica/clique","tipo":"fixa","origem":"sistema/sons"},
      {"id":"r9","texto":"Nunca botões, cards, CTAs ou animações extras","tipo":"proibido","origem":"Recusa aprendida"}]',

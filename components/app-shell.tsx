@@ -96,6 +96,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [menu, setMenu] = React.useState(false);
   React.useEffect(() => setMenu(false), [path]);
   const { videos, modoReal, sessao, carregando } = useStore();
+  const nomeConta = modoReal ? String(sessao?.user.user_metadata?.nome ?? sessao?.user.email ?? "").split(/[ @]/)[0] || "Minha conta" : "Criador";
+  const iniciais = nomeConta.slice(0, 2).toUpperCase();
   React.useEffect(() => {
     if (modoReal && !carregando && !sessao && path !== "/entrar") router.replace("/entrar");
   }, [modoReal, carregando, sessao, path, router]);
@@ -141,10 +143,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </Button>
             <DropdownMenu>
               <DropdownMenuTrigger className="ml-1 rounded-full outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40">
-                <Avatar className="size-8 sm:size-9"><AvatarFallback className="brand-gradient text-white">ED</AvatarFallback></Avatar>
+                <Avatar className="size-8 sm:size-9"><AvatarFallback className="brand-gradient text-white">{iniciais}</AvatarFallback></Avatar>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                <DropdownMenuLabel>Eduardo · Plano Criador</DropdownMenuLabel>
+                <DropdownMenuLabel>{nomeConta} · Plano Criador</DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem asChild><Link href="/biblioteca"><FolderOpen /> Biblioteca</Link></DropdownMenuItem>
                 <DropdownMenuItem asChild><Link href="/reels"><Scissors /> Reels de vídeos longos</Link></DropdownMenuItem>

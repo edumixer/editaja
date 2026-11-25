@@ -124,8 +124,10 @@ def _sobreposicoes(trechos, frases, imagens, palavras_produto, vel):
              "ate": max(p["ate"] for p in pontos), "som": "gota"}]
 
 
-# ---------------------------------------------------------------- hooks × CTAs
-PALAVRAS_CTA = ("link", "carrinho", "clica", "clique", "compra", "comenta", "garante", "corre", "segue", "bio")
+# ---------------------------------------------------------------- hooks × CTAs (só o que foi FALADO no vídeo)
+PALAVRAS_CTA = ("link", "carrinho", "clica", "clique", "compra", "comenta", "garante", "corre", "segue", "bio",
+                "aproveita", "promoção", "promocao", "desconto", "cupom", "frete", "pega o seu", "pega a sua")
+PAUSA_ENTRE_TAKES = 1.3   # pausa (s) que separa duas tentativas/alternativas gravadas no mesmo bruto
 
 
 def _casar_texto(frases, texto):
@@ -142,8 +144,59 @@ def _casar_texto(frases, texto):
     return faixa if melhor >= 0.45 else None
 
 
+def _blocos(frases, pausa=PAUSA_ENTRE_TAKES):
+    """Junta frases separadas por pausas curtas. Cada bloco = um take falado de uma vez."""
+    out = []
+    for f in frases:
+        if out and f["s"] - out[-1]["e"] < pausa:
+            out[-1]["e"] = f["e"]; out[-1]["texto"] += " " + f["texto"]
+        else:
+            out.append({"s": f["s"], "e": f["e"], "texto": f["texto"]})
+    return out
+
+
+def _parecidos(a, b):
+    import difflib
+    return difflib.SequenceMatcher(None, a.lower().split(), b.lower().split()).ratio() >= 0.75
+
+
+def _sem_retakes(blocos):
+    """Tentativa repetida (quase igual à seguinte) não é alternativa: fica só a última."""
+    return [b for i, b in enumerate(blocos) if not (i + 1 < len(blocos) and _parecidos(b["texto"], blocos[i + 1]["texto"]))]
+
+
+def _heuristica_hooks_ctas(frases, duracao):
+    """Sem IA: ganchos = takes curtos no começo, separados por pausa longa, antes do corpo do vídeo;
+    CTAs = takes do final que têm palavra de chamada. Na dúvida, devolve no máximo 1 de cada (nada inventado)."""
+    bl = _blocos(frases)
+    curta = lambda x: [dict(x)] if x and x["e"] - x["s"] <= 8.0 else []
+    if len(bl) < 2:
+        return curta(frases[0]), []
+    hooks = []
+    for b in bl:
+        if b["s"] > duracao * 0.35 or b["e"] - b["s"] > 8.0:
+            break
+        hooks.append(b)
+    hooks = _sem_retakes(hooks)[:4]
+    if len(hooks) >= len(bl) - 1:          # sem corpo depois: não dá para afirmar que são ganchos alternativos
+        hooks = hooks[:1]
+    if len(hooks) <= 1:                    # um gancho só: mostra a primeira frase falada (se curta), sem variações
+        hooks = curta(hooks[0]) if hooks else curta(frases[0])
+    ctas = []
+    for b in reversed(bl):
+        if b["s"] < duracao * 0.6 or b in hooks or not any(w in b["texto"].lower() for w in PALAVRAS_CTA):
+            break
+        ctas.insert(0, b)
+    ctas = _sem_retakes(ctas)[:4]
+    return hooks, ctas
+
+
 def _detectar_hooks_ctas(frases, duracao):
-    """Com ANTHROPIC_API_KEY: Claude lê a transcrição e marca ganchos e CTAs. Sem chave: heurística simples."""
+    """Marca ganchos (início) e CTAs (final) usando SÓ a transcrição do vídeo. Retorna (hooks, ctas, fonte).
+    Com ANTHROPIC_API_KEY o Claude lê a fala; sem chave, heurística por pausas/palavras.
+    Só devolve mais de 1 quando a pessoa realmente gravou alternativas."""
+    if not frases:
+        return [], [], "sem_fala"
     if os.environ.get("ANTHROPIC_API_KEY"):
         try:
             import anthropic
@@ -151,56 +204,132 @@ def _detectar_hooks_ctas(frases, duracao):
             msg = anthropic.Anthropic().messages.create(
                 model="claude-sonnet-5-5", max_tokens=1500,
                 messages=[{"role": "user", "content":
-                    "Transcrição de um vídeo bruto de TikTok, uma frase por linha (índice: [início-fim] texto).\n"
-                    "A pessoa pode ter gravado vários GANCHOS alternativos no início e várias CTAs alternativas no final.\n"
-                    "Responda só JSON: {\"hooks\": [[i_ini, i_fim], ...], \"ctas\": [[i_ini, i_fim], ...]} com os intervalos "
-                    "de frases de cada gancho e de cada CTA. Lista vazia se não houver.\n\n" + linhas}])
+                    "Transcrição de um vídeo BRUTO de TikTok (sem edição), uma frase por linha (índice: [início-fim] texto).\n"
+                    "Às vezes a pessoa grava VÁRIOS GANCHOS ALTERNATIVOS no começo (frases diferentes para abrir o vídeo, "
+                    "das quais só uma vai ao ar) e/ou VÁRIAS CTAs ALTERNATIVAS no final (chamadas diferentes para fechar).\n"
+                    "Regras: use só índices desta transcrição; não invente nada. Tentativa repetida da MESMA frase (errou e "
+                    "refez) NÃO é alternativa: marque só a última. Se só existe um gancho, devolva só ele; o mesmo para a CTA. "
+                    "Frase do meio do vídeo não é gancho nem CTA. Se não houver CTA falada, lista vazia.\n"
+                    "Responda só JSON: {\"hooks\": [[i_ini, i_fim], ...], \"ctas\": [[i_ini, i_fim], ...]}\n\n" + linhas}])
             txt = msg.content[0].text
             d = json.loads(txt[txt.index("{"): txt.rindex("}") + 1])
+            ok = lambda x: isinstance(x, list) and len(x) == 2 and 0 <= int(x[0]) <= int(x[1]) < len(frases)
             faixa = lambda a, b: {"texto": " ".join(f["texto"] for f in frases[a:b + 1]), "s": frases[a]["s"], "e": frases[b]["e"]}
-            return [faixa(*x) for x in d.get("hooks", [])], [faixa(*x) for x in d.get("ctas", [])]
+            return ([faixa(int(x[0]), int(x[1])) for x in d.get("hooks", []) if ok(x)][:6],
+                    [faixa(int(x[0]), int(x[1])) for x in d.get("ctas", []) if ok(x)][:6], "ia")
         except Exception as e:  # cai na heurística
             print("detecção por IA falhou:", e)
-    ctas = [{"texto": f["texto"], "s": f["s"], "e": f["e"]} for f in frases
-            if f["s"] > duracao * 0.7 and any(w in f["texto"].lower() for w in PALAVRAS_CTA)]
-    return [], ctas
+    h, c = _heuristica_hooks_ctas(frases, duracao)
+    return h, c, "pausas"
 
 
-def _sem_sobrepor(trechos, faixas):
-    return [t for t in trechos if not any(t["s"] < e and t["e"] > s for s, e in faixas)]
+def _subtrair(trechos, faixas):
+    """Tira dos trechos as faixas de gancho/CTA (recorta em vez de jogar o trecho inteiro fora)."""
+    out = []
+    for t in trechos:
+        partes = [(t["s"], t["e"])]
+        for s, e in faixas:
+            nova = []
+            for a, b in partes:
+                if e <= a or s >= b:
+                    nova.append((a, b)); continue
+                if s - a > 0.15: nova.append((a, s))
+                if b - e > 0.15: nova.append((e, b))
+            partes = nova
+        out += [dict(t, s=round(a, 3), e=round(b, 3)) for a, b in partes]
+    return out
+
+
+FOLGA_INI, FOLGA_FIM = 0.08, 0.15   # nunca cortar o começo/fim das sílabas do gancho ou da CTA
 
 
 def _dentro(trechos, s, e):
     return [dict(t, s=max(t["s"], s), e=min(t["e"], e)) for t in trechos if t["s"] < e and t["e"] > s]
 
 
-def _combinacoes(plano, frases, comb, duracao):
-    """Devolve [(rotulo, hook_idx, cta_idx, trechos)]. Sem ganchos/CTAs múltiplos, devolve só o vídeo normal."""
+def _faixa(trechos, x, total):
+    """Trechos de um gancho/CTA. Se o plano tirou essa fala (achou que era repetição), usa a fala inteira
+    com folga no fim para não cortar a última sílaba."""
+    s, e = max(0.0, x["s"] - FOLGA_INI), min(total, x["e"] + FOLGA_FIM)
+    dentro = _dentro(trechos, s, e)
+    if sum(t["e"] - t["s"] for t in dentro) >= 0.5 * (x["e"] - x["s"]):
+        return dentro
+    return [{"s": round(s, 3), "e": round(e, 3), "texto": x.get("texto", ""), "zoom": 1.0}]
+
+
+def _resolver(frases, lista):
+    out = []
+    for t in lista or []:
+        if not (t.get("texto") or "").strip():
+            continue
+        faixa = (t["s"], t["e"]) if t.get("s") is not None and t.get("e") is not None else _casar_texto(frases, t["texto"])
+        if faixa:
+            out.append({"texto": t["texto"].strip(), "s": float(faixa[0]), "e": float(faixa[1])})
+    return out
+
+
+def _combinacoes(plano, frases, comb, duracao, deteccao=None):
+    """Devolve ([(rotulo, hook_idx, cta_idx, trechos)], hooks, ctas). Sem ganchos/CTAs múltiplos, só o vídeo normal."""
     comb = comb or {}
     if comb.get("automatico", True):
-        hooks, ctas = _detectar_hooks_ctas(frases, duracao)
+        if (deteccao or {}).get("status") == "pronta":
+            hooks, ctas = _resolver(frases, deteccao.get("hooks")), _resolver(frases, deteccao.get("ctas"))
+        else:
+            hooks, ctas, _ = _detectar_hooks_ctas(frases, duracao)
     else:
-        def resolver(lista):
-            out = []
-            for t in lista or []:
-                if not (t.get("texto") or "").strip():
-                    continue
-                faixa = (t["s"], t["e"]) if t.get("s") is not None else _casar_texto(frases, t["texto"])
-                if faixa:
-                    out.append({"texto": t["texto"], "s": faixa[0], "e": faixa[1]})
-            return out
-        hooks, ctas = resolver(comb.get("hooks")), resolver(comb.get("ctas"))
+        hooks, ctas = _resolver(frases, comb.get("hooks")), _resolver(frases, comb.get("ctas"))
     if len(hooks) <= 1 and len(ctas) <= 1:
-        return [(None, None, None, plano["trechos"])]
-    faixas = [(x["s"], x["e"]) for x in hooks + ctas]
-    corpo = _sem_sobrepor(plano["trechos"], faixas)
+        return [(None, None, None, plano["trechos"])], hooks, ctas
+    faixas = [(x["s"] - FOLGA_INI, x["e"] + FOLGA_FIM) for x in hooks + ctas]
+    corpo = _subtrair(plano["trechos"], faixas)
     saida = []
     for i, h in enumerate(hooks or [None]):
         for j, c in enumerate(ctas or [None]):
-            tr = (_dentro(plano["trechos"], h["s"], h["e"]) if h else []) + corpo + (_dentro(plano["trechos"], c["s"], c["e"]) if c else [])
-            rot = " + ".join(x for x in (f"Gancho {i + 1}" if h else "", f"CTA {j + 1}" if c else "") if x)
+            tr = (_faixa(plano["trechos"], h, duracao) if h else []) + corpo + (_faixa(plano["trechos"], c, duracao) if c else [])
+            rot = " + ".join(x for x in (f"Gancho {i + 1}" if h and len(hooks) > 1 else "", f"CTA {j + 1}" if c and len(ctas) > 1 else "") if x)
             saida.append((rot, i if h else None, j if c else None, tr))
-    return saida
+    return saida, hooks, ctas
+
+
+def _transcrever(db, v, bruto, editor):
+    """Transcreve uma vez só: guarda brutos/<dono>/<id>/transcricao.json e reaproveita (prévia de ganchos e edição)."""
+    tr_path = editor.paths(bruto)[0]
+    cache = str(pathlib.PurePosixPath(v["bruto_path"]).parent / "transcricao.json")
+    try:
+        with open(tr_path, "wb") as f:
+            f.write(db.storage.from_("brutos").download(cache))
+    except Exception:
+        editor.transcribe(bruto)
+        try:
+            with open(tr_path, "rb") as f:
+                db.storage.from_("brutos").upload(cache, f.read(), {"content-type": "application/json", "upsert": "true"})
+        except Exception as e:
+            print("transcrição não guardada:", e)
+    return (json.load(open(tr_path)).get("frases") or []) if os.path.exists(tr_path) else []
+
+
+@app.function(secrets=[secret], cpu=4.0, memory=4096, timeout=60 * 15)
+def detectar_falas(video_id: str):
+    """Prévia de "Hooks e CTAs": transcreve o bruto e marca os ganchos e CTAs que a pessoa FALOU (com tempos)."""
+    import datetime
+    db = _db()
+    v = db.table("videos").select("*").eq("id", video_id).single().execute().data
+    sys.path.insert(0, _editor_dir())
+    import editor  # noqa: E402
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            bruto = os.path.join(tmp, "bruto" + (pathlib.Path(v["bruto_path"]).suffix or ".mp4"))
+            with open(bruto, "wb") as f:
+                f.write(db.storage.from_("brutos").download(v["bruto_path"]))
+            frases = _transcrever(db, v, bruto, editor)
+            hooks, ctas, fonte = _detectar_hooks_ctas(frases, editor.duration(bruto))
+        r = lambda xs, p: [{"id": f"{p}{k + 1}", "texto": x["texto"].strip(), "s": round(x["s"], 2), "e": round(x["e"], 2)} for k, x in enumerate(xs)]
+        det = {"status": "pronta", "hooks": r(hooks, "h"), "ctas": r(ctas, "c"), "fonte": fonte, "frases": len(frases),
+               "em": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    except Exception as e:
+        det = {"status": "erro", "erro": str(e)[:300]}
+    _status(db, video_id, deteccao=det)
+    return det
 
 
 @app.function(secrets=[secret], cpu=4.0, memory=8192, timeout=60 * 45)
@@ -239,9 +368,8 @@ def editar(video_id: str):
             imagens = _baixar_imagens_produto(db, produto_id, pasta_imgs)   # só as imagens DESTE produto
 
             _etapa(db, video_id, "transcricao")
-            editor.transcribe(bruto)
+            frases = _transcrever(db, v, bruto, editor)
             tr_path, plano_path, saida_padrao = editor.paths(bruto)
-            frases = (json.load(open(tr_path)).get("frases") or []) if os.path.exists(tr_path) else []
 
             _etapa(db, video_id, "cortes")
             editor.plan(bruto)
@@ -273,13 +401,23 @@ def editar(video_id: str):
                             or perfil_estilo.get("surpresa_no_inicio", perfil_estilo.get("uau_no_inicio")) in (True, "sempre"))
             if plano.get("momentos_surpresa") and not surpresa:
                 _status(db, video_id, surpresas=plano["momentos_surpresa"][:3])   # só sugere na Aprovação
-            combos = _combinacoes(plano, frases, v.get("combinacoes") or opcoes.get("combinacoes"), plano["duracao_original"])
+            combos, ganchos, _ctas = _combinacoes(plano, frases, v.get("combinacoes") or opcoes.get("combinacoes"),
+                                                  plano["duracao_original"], v.get("deteccao"))
+            # headline automática: cada versão usa o SEU gancho falado (não o primeiro da gravação)
+            hl_auto = (modo == "auto" and v.get("headline_ativa") is not False
+                       and not (v.get("headline") or hl.get("texto") or "").strip())
+            if v.get("origem_id"):   # refazendo UMA versão (recusada): só a combinação dela
+                combos = [c for c in combos if c[1] == v.get("hook_idx") and c[2] == v.get("cta_idx")][:1] or combos[:1]
+            elif len(combos) > 1 and (db.table("videos").select("id").eq("origem_id", video_id).limit(1).execute().data):
+                combos = combos[:1]   # as outras versões já existem: refaz só a deste vídeo
             if len(combos) > 1:
                 _status(db, video_id, variante=f"{len(combos)} combinações")
 
             _etapa(db, video_id, "render")
             for k, (rotulo, hi, ci, trechos) in enumerate(combos):
                 p = dict(plano, trechos=trechos)
+                if hl_auto and hi is not None and hi < len(ganchos):
+                    p["titulo"] = dict(plano["titulo"], texto=ganchos[hi]["texto"], ativo=True)
                 p["sobreposicoes"] = _sobreposicoes(trechos, frases, imagens, produto.get("palavras") or [], vel)
                 json.dump(p, open(plano_path, "w"), ensure_ascii=False, indent=1)
                 saida = saida_padrao.replace(".mp4", f"_{k + 1}.mp4")
@@ -297,9 +435,9 @@ def editar(video_id: str):
                     db.storage.from_("editados").upload(destino, f.read(), {"content-type": "video/mp4", "upsert": "true"})
                 extra = {"variante": rotulo, "hook_idx": hi, "cta_idx": ci} if rotulo else {}
                 # qual gancho este vídeo usou: alimenta o ranking "Em alta" (views por gancho e por época)
-                hooks = ((v.get("combinacoes") or opcoes.get("combinacoes") or {}).get("hooks") or [])
-                gtxt = (hooks[hi].get("texto") if hi is not None and hi < len(hooks) else None) or plano["titulo"].get("texto") or (frases[0]["texto"] if frases else None)
+                gtxt = (ganchos[hi]["texto"] if hi is not None and hi < len(ganchos) else None) or p["titulo"].get("texto") or (frases[0]["texto"] if frases else None)
                 if gtxt: extra["gancho_texto"] = gtxt.strip()[:300]
+                if hl_auto and p["titulo"].get("texto"): extra["headline"] = p["titulo"]["texto"].strip()[:300]
                 _status(db, alvo_id, status="aprovacao", etapa=len(ETAPAS) - 1, progresso=100, editado_path=destino,
                         estilo_id=estilo.get("estilo_id"), estilo_versao=estilo.get("n"), produto_id=produto_id,
                         duracao_bruto=editor.duration(bruto), duracao_final=editor.duration(saida),
@@ -347,8 +485,8 @@ def _escrever_textos(db, v, produto, fala):
     tags = []
     for linha in refs["hashtags"]:
         tags += [w for w in linha.split() if w.startswith("#") and w not in tags]
-    cta = (refs["cta"] or ["Comenta EU QUERO que eu te mando o link"])[0]
-    return {"legenda": v.get("headline") or produto.get("nome", ""), "descricao": f"{fala[:180].strip()}... {cta}.",
+    cta = (refs["cta"] or [""])[0]   # só CTA cadastrada pela pessoa; nada inventado
+    return {"legenda": v.get("headline") or produto.get("nome", ""), "descricao": f"{fala[:180].strip()}..." + (f" {cta}." if cta else ""),
             "hashtags": tags[:6]}
 
 
@@ -468,6 +606,13 @@ def vigiar():
                  .eq("id", v["id"]).eq("status", v["status"]).execute().data)
         if pegou:
             editar.spawn(v["id"])
+    # prévia de ganchos/CTAs pedida na tela de envio: transcreve e marca o que foi falado
+    pedidos = (db.table("videos").select("id").eq("deteccao->>status", "pedida").limit(20).execute().data or [])
+    for d in pedidos:
+        pegou = (db.table("videos").update({"deteccao": {"status": "lendo"}}).eq("id", d["id"])
+                 .eq("deteccao->>status", "pedida").execute().data)
+        if pegou:
+            detectar_falas.spawn(d["id"])
     return len(fila)
 
 

@@ -227,7 +227,7 @@ export default function Revisao() {
 
   const pendente = v.status === "aprovacao";
   const estiloId = v.estiloId ?? "clean";
-  const estiloNome = estilos.find((e) => e.id === estiloId)?.nome ?? "Clean do Eduardo";
+  const estiloNome = estilos.find((e) => e.id === estiloId)?.nome ?? "Clean";
   const doAprovar = () => {
     setAprovando(true);
     setTimeout(() => {

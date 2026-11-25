@@ -52,32 +52,32 @@ const INI = (pasta: string): Origem => ({ tipo: "inicial", pasta });
 
 const REGRAS_CLEAN: Regra[] = [
   { id: "r1", texto: "Todo vídeo abre com 0,1 s de capa (mantém a do bruto ou escolhe o melhor take)", tipo: "fixa", origem: "COMO-USAR.md" },
-  { id: "r2", texto: "Velocidade 1.1x em todo vídeo exportado", tipo: "fixa", origem: "Pedido do Eduardo · 12 nov" },
+  { id: "r2", texto: "Velocidade 1.1x em todo vídeo exportado", tipo: "fixa", origem: "Regra padrão · 12 nov" },
   { id: "r3", texto: "Cortes secos de respiros e tentativas repetidas, mantendo a última", tipo: "fixa", origem: "estilo-referencia.md" },
   { id: "r4", texto: "Nunca cortar o fim de sílabas/frases; folga após cada frase", tipo: "fixa", origem: "Recusa: “mulheres” cortado" },
   { id: "r5", texto: "Qualidade original: resolução, cor e saturação do bruto", tipo: "fixa", origem: "Recusa · 12 nov" },
-  { id: "r6", texto: "Headline com “cuidado/falso/golpe” ganha emoji de alerta ao lado", tipo: "preferencia", origem: "Pedido do Eduardo" },
+  { id: "r6", texto: "Headline com “cuidado/falso/golpe” ganha emoji de alerta ao lado", tipo: "preferencia", origem: "Regra padrão" },
   { id: "r7", texto: "Uma imagem por “falso” falado, onde a pessoa aponta, levemente inclinada, sem animação", tipo: "preferencia", origem: "referencia_imagens_inclinadas.mov" },
   { id: "r8", texto: "Bubble pop em cada foto que entra; mouse-click quando falar “clica”", tipo: "preferencia", origem: "Pasta Sons" },
   { id: "r9", texto: "Sem cards, botões, CTAs visuais ou animações extras", tipo: "proibido", origem: "2 recusas · 12 nov" },
-  { id: "r10", texto: "Headline é opcional: automática, escrita pela pessoa (na posição escolhida) ou sem texto na tela", tipo: "preferencia", origem: "Pedido do Eduardo · 16 nov" },
+  { id: "r10", texto: "Headline é opcional: automática, escrita pela pessoa (na posição escolhida) ou sem texto na tela", tipo: "preferencia", origem: "Regra padrão · 16 nov" },
 ];
 
 export const ESTILOS_INICIAIS: Estilo[] = [
   {
-    id: "clean", nome: "Clean do Eduardo", padrao: true, hue: 290, usos: 9, aprovacao: 87, versaoAtual: 4,
+    id: "clean", nome: "Clean", padrao: true, hue: 290, usos: 9, aprovacao: 87, versaoAtual: 4,
     descricao: "Cortes secos, 1.1x, imagens onde aponta, sons fixos. Sem cards nem animações.",
     versoes: [
       { n: 1, quando: "12 nov 10:05", autor: "Análise automática", motivo: "Criado a partir do vídeo de referência da Nathana", origem: { tipo: "colaborador", nome: "Nathana" },
         mudancas: ["+ cortes secos", "+ título-gancho nos 6 s", "+ punch-ins a cada 8–15 s", "+ cards de produto e avaliações"],
         perfil: { ...PERFIL_CLEAN, sons: { foto: null, print_ou_fala_clica: null, volume: 0.8 }, proibido: [] }, regras: REGRAS_CLEAN.slice(0, 3) },
-      { n: 2, quando: "12 nov 14:40", autor: "Recusa do Eduardo", motivo: "“Tirar o carrinho laranja e deixar só as imagens onde eu aponto.”", origem: { tipo: "aprendizado", video: "Sérum Facil v2" },
+      { n: 2, quando: "12 nov 14:40", autor: "Recusa aprendida", motivo: "“Tirar o carrinho laranja e deixar só as imagens onde eu aponto.”", origem: { tipo: "aprendizado", video: "Sérum Facil v2" },
         mudancas: ["− cards de produto/loja/carrinho", "− punch-ins e fades", "+ proibido: CTAs visuais", "+ imagens onde a pessoa aponta"],
         perfil: { ...PERFIL_CLEAN, sons: { foto: null, print_ou_fala_clica: null, volume: 0.8 } }, regras: [...REGRAS_CLEAN.slice(0, 3), REGRAS_CLEAN[6], REGRAS_CLEAN[8]] },
       { n: 3, quando: "12 nov 15:30", autor: "Referência + Sons", motivo: "Fotos inclinadas e sons oficiais escolhidos", origem: INI("referencias/ + sistema/sons"),
         mudancas: ["+ inclinação −7° / +6°", "+ Bubble pop em cada foto", "+ mouse-click no “clica”", "− sons sintetizados"],
         perfil: PERFIL_CLEAN, regras: [...REGRAS_CLEAN.slice(0, 3), ...REGRAS_CLEAN.slice(6)] },
-      { n: 4, quando: "12 nov 18:10", autor: "Recusa do Eduardo", motivo: "“Cortou o fim de ‘mulheres’” + qualidade e capa", origem: { tipo: "aprendizado", video: "Sérum Facil v5" },
+      { n: 4, quando: "12 nov 18:10", autor: "Recusa aprendida", motivo: "“Cortou o fim de ‘mulheres’” + qualidade e capa", origem: { tipo: "aprendizado", video: "Sérum Facil v5" },
         mudancas: ["+ folga 0,12 s no fim das frases", "+ capa 0,1 s", "+ qualidade original", "+ emoji de alerta na headline"],
         perfil: PERFIL_CLEAN, regras: REGRAS_CLEAN },
     ],
