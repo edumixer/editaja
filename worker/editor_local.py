@@ -41,6 +41,7 @@ class _Nada:
     def function(self, *a, **k): return lambda f: f
 _m.Image = _Nada(); _m.App = _Nada; _m.Secret = _Nada()
 _m.fastapi_endpoint = lambda *a, **k: (lambda f: f)
+_m.Period = _m.Cron = lambda *a, **k: None
 _Nada.from_name = staticmethod(lambda *a, **k: None)
 sys.modules["modal"] = _m
 sys.path.insert(0, str(AQUI))

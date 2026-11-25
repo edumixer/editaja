@@ -1,0 +1,14 @@
+EditaJá: editor na nuvem (Modal), sem depender do seu PC
+
+1. Crie uma conta grátis em https://modal.com (botão Sign up, pode entrar com GitHub ou Google).
+2. Descompacte este zip DENTRO da pasta plataforma\worker do projeto
+   (a mesma pasta onde está o editor_local.py e o arquivo .env).
+3. Dê dois cliques em ligar-na-nuvem.bat e siga a tela.
+   - Ele abre o navegador uma vez para você aprovar o acesso à conta Modal.
+   - Ele pega a chave do Supabase do seu .env sozinho (se não achar, pede para colar).
+
+Pronto: a cada 1 minuto o editor olha a fila e edita os vídeos, cada um numa máquina própria.
+Pode deixar o editor do PC desligado. Se os dois estiverem ligados, não tem problema: cada vídeo é pego por um só.
+
+Custo: o plano grátis do Modal dá US$ 30 por mês. Cada vídeo de 1 min gasta uns US$ 0,01 e o "vigia" da fila
+uns US$ 1 por mês. Para ver o gasto: modal.com > Usage. Se um dia passar dos US$ 30, o Modal pede cartão antes de cobrar.

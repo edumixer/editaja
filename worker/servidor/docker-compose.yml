@@ -1,0 +1,11 @@
+services:
+  editor:
+    build: .
+    container_name: editaja-editor
+    restart: always          # volta sozinho se cair ou se o servidor reiniciar
+    env_file: .env
+    # se o servidor tiver pouca memória, limite aqui (ex.: 3g)
+    # mem_limit: 3g
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

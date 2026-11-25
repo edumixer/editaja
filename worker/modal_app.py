@@ -6,12 +6,13 @@ Fluxo:  app (Next.js) --POST /editar {video_id}--> este worker
         sobe o resultado em `editados/` e atualiza a linha em `videos` (status/etapa/progresso).
         A tela da fila acompanha em tempo real pelo Supabase Realtime.
 
-Deploy (uma vez):
-    pip install modal && modal token new
-    modal secret create editaja-supabase SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... WORKER_TOKEN=<um segredo longo>
-    modal deploy worker/modal_app.py
-O endpoint gerado (https://<conta>--editaja-worker-editar.modal.run) vai na Vercel como EDITAJA_WORKER_URL.
-Custo: só cobra enquanto um vídeo está sendo editado (CPU, ~3-5 min por vídeo de 2 min).
+Deploy (uma vez, no Windows): rode ligar-na-nuvem.bat (pacote editaja-nuvem.zip). Ele faz:
+    pip install modal ; python -m modal setup
+    python -m modal secret create editaja-supabase --from-dotenv ../.env   (SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    python -m modal deploy modal_app.py
+Depois disso a função "vigiar" roda sozinha a cada 1 min: pega a fila e edita, sem o PC ligado.
+Opcional: EDITAJA_WORKER_URL (endpoint "enfileirar") + EDITAJA_WORKER_TOKEN na Vercel para começar na hora.
+Custo: só cobra enquanto edita (~US$ 0,01 por vídeo de 1 min) + ~US$ 1/mês do vigia; o plano grátis dá US$ 30/mês.
 """
 import json
 import os
@@ -22,21 +23,31 @@ import tempfile
 
 import modal
 
-SISTEMA = pathlib.Path(__file__).resolve().parent.parent.parent / "sistema"  # /mnt/project-files/sistema
+# editor.py e sons: na pasta "editor" ao lado deste arquivo (pacote de deploy) ou em <projeto>/sistema
+_AQUI = pathlib.Path(__file__).resolve().parent
+SISTEMA = _AQUI / "editor" if (_AQUI / "editor" / "editor.py").exists() else _AQUI.parent.parent / "sistema"
+MODELO_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin"
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .apt_install("ffmpeg", "fonts-dejavu-core", "fonts-noto-color-emoji", "fonts-inter")
+    .apt_install("ffmpeg", "fonts-dejavu-core", "fonts-noto-color-emoji", "fonts-inter", "curl")
     .pip_install("pywhispercpp", "Pillow", "supabase>=2.4", "fastapi[standard]", "anthropic")
+    # modelo de voz baixado na montagem da imagem (não precisa subir 180 MB do seu PC)
+    .run_commands(f"mkdir -p /editor/modelos && curl -L --fail -o /editor/modelos/ggml-small-q5_1.bin {MODELO_URL}")
     .add_local_file(str(SISTEMA / "editor.py"), "/editor/editor.py")
     .add_local_dir(str(SISTEMA / "sons"), "/editor/sons")
-    .add_local_file(str(SISTEMA / "modelos" / "ggml-small-q5_1.bin"), "/editor/modelos/ggml-small-q5_1.bin")
 )
 
 app = modal.App("editaja-worker", image=image)
 secret = modal.Secret.from_name("editaja-supabase")
 
 ETAPAS = ["upload", "transcricao", "cortes", "velocidade", "sons", "imagens", "render"]
+
+
+def _editor_dir():
+    """Pasta do editor.py: EDITOR_DIR (PC) se existir; na nuvem, /editor."""
+    d = os.environ.get("EDITOR_DIR")
+    return d if d and os.path.exists(os.path.join(d, "editor.py")) else "/editor"
 
 
 def _db():
@@ -214,7 +225,7 @@ def editar(video_id: str):
         produto = (db.table("produtos").select("*").eq("owner_id", v["owner_id"]).eq(campo, produto_id)
                    .limit(1).execute().data or [{}])[0]
         produto_id = produto.get("id")
-    sys.path.insert(0, os.environ.get("EDITOR_DIR", "/editor"))
+    sys.path.insert(0, _editor_dir())
     import editor  # noqa: E402  (o mesmo editor.py usado hoje, com as regras fixas)
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -388,7 +399,7 @@ def analisar_referencia(referencia_id: str):
     import base64
     db = _db()
     r = db.table("referencias").select("*").eq("id", referencia_id).single().execute().data
-    sys.path.insert(0, os.environ.get("EDITOR_DIR", "/editor"))
+    sys.path.insert(0, _editor_dir())
     import editor  # noqa: E402
     with tempfile.TemporaryDirectory() as tmp:
         video = os.path.join(tmp, "ref" + (pathlib.Path(r["storage_path"]).suffix or ".mp4"))
@@ -441,6 +452,25 @@ def analisar_referencia(referencia_id: str):
                                                            "tipo": "preferencia", "origem": r["nome"]}}}).execute()
 
 
+@app.function(secrets=[secret], cpu=0.25, memory=512, timeout=120, schedule=modal.Period(minutes=1))
+def vigiar():
+    """A cada 1 min: avisa que o editor está ligado (tela Fila mostra "Ligado") e manda editar
+    cada vídeo que estiver na fila, cada um na sua máquina. Funciona junto com o editor do PC:
+    cada vídeo é pego por um só (troca fila -> editando só se ninguém pegou antes)."""
+    import time
+    db = _db()
+    agora = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    db.table("config_robo").upsert({"chave": "editor_visto_em", "valor": agora}, on_conflict="chave").execute()
+    fila = (db.table("videos").select("id,status").in_("status", ["fila", "recusado"])
+            .order("created_at").limit(20).execute().data or [])
+    for v in fila:
+        pegou = (db.table("videos").update({"status": "editando", "etapa": 0, "progresso": 0})
+                 .eq("id", v["id"]).eq("status", v["status"]).execute().data)
+        if pegou:
+            editar.spawn(v["id"])
+    return len(fila)
+
+
 @app.function(secrets=[secret])
 @modal.fastapi_endpoint(method="POST")
 def enfileirar(body: dict):
@@ -451,8 +481,8 @@ def enfileirar(body: dict):
         raise HTTPException(status_code=401, detail="token inválido")
     video_id = body["video_id"]
     _status(_db(), video_id, status="fila", etapa=0, progresso=0)
-    call = editar.spawn(video_id)
-    return {"ok": True, "call_id": call.object_id}
+    vigiar.spawn()   # o vigia pega o vídeo da fila (marca "editando") e começa na hora
+    return {"ok": True}
 
 
 @app.function(secrets=[secret])
