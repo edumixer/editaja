@@ -16,6 +16,7 @@ Custo: só cobra enquanto edita (~US$ 0,01 por vídeo de 1 min) + ~US$ 1/mês do
 """
 import json
 import os
+import re
 import pathlib
 import subprocess
 import sys
@@ -65,15 +66,34 @@ def _etapa(db, video_id, nome):
 
 
 # ---------------------------------------------------------------- produto: imagens onde a pessoa aponta
+# Palavras faladas que chamam cada etiqueta de imagem do produto (comparadas sem acento e sem maiúscula).
 GATILHOS = {
-    "falso": ("falso", "falsa", "falsificado", "réplica", "replica", "pirata"),
-    "original": ("original", "verdadeiro", "verdadeira", "oficial"),
-    "print": ("clica", "clique", "clicar", "loja", "avaliação", "avaliações"),
+    "falso": ("falso", "falsa", "falsos", "falsas", "falsificado", "falsificada", "replica", "pirata", "fake", "imitacao", "paraguai"),
+    "original": ("original", "originais", "verdadeiro", "verdadeira", "oficial", "autentico", "autentica", "legitimo", "legitima"),
+    "print": ("clica", "clique", "clicar", "loja", "avaliacao", "avaliacoes", "comentario", "comentarios", "estrelas", "vendidos", "vendas", "nota"),
+    "detalhe": ("detalhe", "detalhes", "textura", "embalagem", "tampa", "rotulo", "acabamento", "costura", "tecido", "de perto", "olha so", "por dentro"),
+    "produto": ("produto", "produtinho", "esse aqui", "essa aqui", "este aqui", "esta aqui", "olha esse", "olha essa"),
 }
+# Sugestão de lugar por etiqueta (fração da tela 9:16, canto de cima à esquerda da imagem). A pessoa ajusta na Aprovação.
+LUGAR = {
+    "falso":    [{"x": 0.05, "y": 0.10, "angulo": -7}, {"x": 0.53, "y": 0.10, "angulo": 6}],
+    "original": [{"x": 0.53, "y": 0.10, "angulo": 6}, {"x": 0.05, "y": 0.10, "angulo": -7}],
+    "produto":  [{"x": 0.53, "y": 0.12, "angulo": 6}, {"x": 0.05, "y": 0.12, "angulo": -6}],
+    "detalhe":  [{"x": 0.53, "y": 0.34, "angulo": 5}, {"x": 0.05, "y": 0.34, "angulo": -5}],
+    "print":    [{"x": 0.12, "y": 0.10, "angulo": -3}],
+}
+LARGURA = {"print": 0.76, "detalhe": 0.40}
+DURACAO_IMAGEM = 2.0
+
+
+def _sem_acento(t):
+    import unicodedata
+    t = unicodedata.normalize("NFD", (t or "").lower())
+    return re.sub(r"[^a-z0-9 ]", " ", "".join(c for c in t if unicodedata.category(c) != "Mn"))
 
 
 def _baixar_imagens_produto(db, produto_id, pasta):
-    """Baixa só as imagens do produto vinculado. Retorna {rotulo: [arquivos]}."""
+    """Baixa só as imagens do produto vinculado. Retorna {rotulo: [{arquivo, id, path}]}."""
     if not produto_id:
         return {}
     por_rotulo = {}
@@ -81,10 +101,26 @@ def _baixar_imagens_produto(db, produto_id, pasta):
     os.makedirs(pasta, exist_ok=True)
     for r in rows:
         nome = f"{r['id']}{pathlib.Path(r['storage_path']).suffix or '.png'}"
-        with open(os.path.join(pasta, nome), "wb") as f:
-            f.write(db.storage.from_("biblioteca").download(r["storage_path"]))
-        por_rotulo.setdefault(r["rotulo"], []).append(nome)
+        try:
+            with open(os.path.join(pasta, nome), "wb") as f:
+                f.write(db.storage.from_("biblioteca").download(r["storage_path"]))
+        except Exception as e:
+            print("imagem do produto não baixada:", r["storage_path"], e)
+            continue
+        if nome.lower().endswith((".heic", ".heif", ".avif")):   # o ffmpeg do editor não lê bem: converte para png
+            try:
+                png = nome.rsplit(".", 1)[0] + ".png"
+                subprocess.run(["ffmpeg", "-y", "-i", os.path.join(pasta, nome), os.path.join(pasta, png)], check=True, capture_output=True)
+                nome = png
+            except Exception:
+                continue
+        por_rotulo.setdefault(r["rotulo"], []).append({"arquivo": nome, "id": r["id"], "path": r["storage_path"]})
     return por_rotulo
+
+
+def _sem_ponto(t):
+    """Regra fixa: headline NUNCA termina com ponto final (reticências e ponto final saem; ! e ? ficam)."""
+    return re.sub(r"[\s.…]+$", "", (t or "").strip())
 
 
 def _tempo_final(trechos, t_bruto, vel):
@@ -97,31 +133,117 @@ def _tempo_final(trechos, t_bruto, vel):
     return None
 
 
-def _sobreposicoes(trechos, frases, imagens, palavras_produto, vel):
-    """1 imagem por gatilho falado, inclinada, sem animação, alternando o lado (esq/dir), com som de gota."""
+def _palavras_produto(produto):
+    """Nome e palavras-chave do produto, sem acento (ex.: "Sérum Facial" -> "serum facial", "serum")."""
+    out = set()
+    for w in list(produto.get("palavras") or []) + [produto.get("nome") or ""]:
+        w = " ".join(_sem_acento(w).split())
+        if len(w) >= 3:
+            out.add(w)
+        for parte in w.split():
+            if len(parte) >= 4 and parte not in ("para", "com", "kit", "novo", "nova"):
+                out.add(parte)
+    return out
+
+
+def _gatilhos_falados(palavras, frases, produto):
+    """Lista (t_bruto, rotulo, palavra) de cada gatilho falado, usando o tempo da PALAVRA (não da frase)."""
+    tokens = [(w["s"], _sem_acento(w.get("w", "")).strip()) for w in (palavras or []) if _sem_acento(w.get("w", "")).strip()]
+    if not tokens:   # transcrição sem palavras: usa o começo de cada frase
+        tokens = [(f["s"], _sem_acento(f["texto"]).strip()) for f in frases]
+    gat = {r: tuple(ws) for r, ws in GATILHOS.items()}
+    gat["produto"] = tuple(gat["produto"]) + tuple(_palavras_produto(produto))
+    achados = []
+    for i, (t, w) in enumerate(tokens):
+        janela = " ".join(x[1] for x in tokens[i:i + 3])
+        for rot, ws in gat.items():
+            for g in ws:
+                if (" " in g and janela.startswith(g)) or (" " not in g and (w == g or w.split()[:1] == [g])):
+                    achados.append((t, rot, g))
+                    break
+            else:
+                continue
+            break
+    return achados
+
+
+def _sugerir_imagens(trechos, palavras, frases, imagens, produto, vel):
+    """Sugere 1 imagem por gatilho falado (tempo no vídeo FINAL), no lugar padrão da etiqueta.
+    Cada item: {id, rotulo, imagem_id, path, arquivo, de, ate, x, y, largura, angulo, motivo}."""
     if not imagens:
         return []
-    pontos, arquivos, usados, lado = [], [], {}, 0
-    for fr in frases:
-        txt = fr["texto"].lower()
-        rot = next((r for r, ws in GATILHOS.items() if any(w in txt for w in ws)), None)
-        if rot is None and any(w.lower() in txt for w in palavras_produto):
-            rot = "produto"
-        lista = imagens.get(rot) or (imagens.get("produto") or imagens.get("original") if rot in ("produto", "original") else None)
-        if not lista:
-            continue
-        de = _tempo_final(trechos, fr["s"] + 0.05, vel)
-        if de is None:
-            continue
-        k = usados.get(rot, 0); usados[rot] = k + 1
-        arquivos.append(lista[k % len(lista)])
-        pontos.append({"x": 0.05 if lado % 2 == 0 else 0.53, "y": 0.10, "de": round(de, 2),
-                       "ate": round(de + 1.6, 2), "angulo": -7 if lado % 2 == 0 else 6})
-        lado += 1
-    if not pontos:
+    def lista(rot):
+        if imagens.get(rot):
+            return imagens[rot]
+        if rot == "produto":
+            return imagens.get("original") or []
+        if rot == "original":
+            return imagens.get("produto") or []
         return []
-    return [{"tipo": "apontado", "arquivos": arquivos, "pontos": pontos, "largura": 0.42,
-             "ate": max(p["ate"] for p in pontos), "som": "gota"}]
+    itens, usados, ultimo = [], {}, {}
+    for t, rot, g in _gatilhos_falados(palavras, frases, produto):
+        imgs = lista(rot)
+        if not imgs:
+            continue
+        de = _tempo_final(trechos, t + 0.02, vel)
+        if de is None:   # essa fala foi cortada
+            continue
+        # "falso, falso" = 2 imagens seguidas; nos outros, a mesma etiqueta não repete em menos de 3 s
+        if rot != "falso" and de - ultimo.get(rot, -99) < 3.0:
+            continue
+        if rot == "falso" and de - ultimo.get(rot, -99) < 0.25:
+            continue
+        k = usados.get(rot, 0); usados[rot] = k + 1; ultimo[rot] = de
+        img = imgs[k % len(imgs)]
+        opcoes_lugar = LUGAR.get(rot, LUGAR["produto"])
+        opcoes_lugar = opcoes_lugar[k % len(opcoes_lugar):] + opcoes_lugar[:k % len(opcoes_lugar)]
+        ativas = [i for i in itens if i["ate"] > de]
+        def ocupado(l):
+            return [i for i in ativas if abs(i["x"] - l["x"]) < 0.3 and abs(i["y"] - l["y"]) < 0.2]
+        lug = next((l for l in opcoes_lugar if not ocupado(l)), opcoes_lugar[0])
+        for i in ocupado(lug):   # sem lugar livre: a imagem anterior sai quando a nova entra
+            i["ate"] = round(de, 2)
+        mm, ss = divmod(int(de), 60)
+        itens.append({"id": f"i{len(itens) + 1}", "rotulo": rot, "imagem_id": img["id"], "path": img["path"], "arquivo": img["arquivo"],
+                      "de": round(de, 2), "ate": round(de + DURACAO_IMAGEM, 2), "x": lug["x"], "y": lug["y"],
+                      "largura": LARGURA.get(rot, 0.42), "angulo": lug["angulo"],
+                      "motivo": f"Você falou “{g}” em {mm}:{ss:02d}"})
+    # imagens lado a lado (ex.: "falso, falso") ficam juntas até a última sair
+    for a in itens:
+        for b in itens:
+            if a is not b and a["rotulo"] == b["rotulo"] == "falso" and 0 < b["de"] - a["de"] < 1.2:
+                a["ate"] = max(a["ate"], b["ate"])
+    # uma imagem de "Produto" que não foi chamada por nenhuma fala: sugere logo depois do gancho (a pessoa pode tirar)
+    if lista("produto") and not any(i["rotulo"] in ("produto", "original") for i in itens):
+        t0 = next((f["s"] for f in frases[1:] if _tempo_final(trechos, f["s"] + 0.05, vel) is not None), None)
+        de = _tempo_final(trechos, t0 + 0.05, vel) if t0 is not None else None
+        if de is not None:
+            img = lista("produto")[0]; lug = LUGAR["produto"][0]
+            itens.append({"id": f"i{len(itens) + 1}", "rotulo": "produto", "imagem_id": img["id"], "path": img["path"], "arquivo": img["arquivo"],
+                          "de": round(de, 2), "ate": round(de + DURACAO_IMAGEM, 2), "x": lug["x"], "y": lug["y"], "largura": 0.42,
+                          "angulo": lug["angulo"], "motivo": "Sugestão: você não falou o nome do produto, então coloquei depois do gancho"})
+    return sorted(itens, key=lambda i: i["de"])
+
+
+def _ajustadas(itens, imagens):
+    """Imagens que a pessoa posicionou na Aprovação: liga cada uma ao arquivo baixado (pelo id da imagem)."""
+    por_id = {img["id"]: img for imgs in imagens.values() for img in imgs}
+    out = []
+    for i in itens or []:
+        img = por_id.get(i.get("imagem_id"))
+        if img and i.get("de") is not None:
+            out.append(dict(i, arquivo=img["arquivo"], path=img["path"]))
+    return out
+
+
+def _sobreposicoes(itens):
+    """Formato do editor.py: foto inclinada entra seca, sem animação, com som de bolha em cada uma."""
+    if not itens:
+        return []
+    return [{"tipo": "apontado", "arquivos": [i["arquivo"] for i in itens], "som": "gota", "largura": 0.42,
+             "pontos": [{"x": float(i["x"]), "y": float(i["y"]), "de": float(i["de"]), "ate": float(i["ate"]),
+                         "angulo": float(i.get("angulo", 0)), "largura": float(i.get("largura", 0.42))} for i in itens],
+             "ate": max(float(i["ate"]) for i in itens)}]
 
 
 # ---------------------------------------------------------------- hooks × CTAs (só o que foi FALADO no vídeo)
@@ -370,6 +492,10 @@ def editar(video_id: str):
             _etapa(db, video_id, "transcricao")
             frases = _transcrever(db, v, bruto, editor)
             tr_path, plano_path, saida_padrao = editor.paths(bruto)
+            try:
+                palavras = json.load(open(tr_path)).get("palavras") or []
+            except Exception:
+                palavras = []
 
             _etapa(db, video_id, "cortes")
             editor.plan(bruto)
@@ -384,9 +510,9 @@ def editar(video_id: str):
             if modo == "sem" or v.get("headline_ativa") is False:
                 tit.update(texto="", ativo=False)
             else:
-                texto = (v.get("headline") or hl.get("texto") or "").strip()
+                texto = _sem_ponto(v.get("headline") or hl.get("texto") or "")
                 if not texto and modo == "auto" and frases:
-                    texto = frases[0]["texto"].strip()
+                    texto = _sem_ponto(frases[0]["texto"])
                 tit.update(texto=texto, ativo=bool(texto))
                 x, y = v.get("headline_x", hl.get("x")), v.get("headline_y", hl.get("y"))
                 if x is not None: tit["x"] = float(x)
@@ -417,8 +543,14 @@ def editar(video_id: str):
             for k, (rotulo, hi, ci, trechos) in enumerate(combos):
                 p = dict(plano, trechos=trechos)
                 if hl_auto and hi is not None and hi < len(ganchos):
-                    p["titulo"] = dict(plano["titulo"], texto=ganchos[hi]["texto"], ativo=True)
-                p["sobreposicoes"] = _sobreposicoes(trechos, frases, imagens, produto.get("palavras") or [], vel)
+                    p["titulo"] = dict(plano["titulo"], texto=_sem_ponto(ganchos[hi]["texto"]), ativo=True)
+                # imagens do produto: as que a pessoa posicionou na Aprovação ou a sugestão pelos gatilhos falados
+                linha = v if k == 0 else {}
+                if linha.get("imagens_ajustadas") and linha.get("imagens") is not None:
+                    itens = _ajustadas(linha["imagens"], imagens)
+                else:
+                    itens = _sugerir_imagens(trechos, palavras, frases, imagens, produto, vel)
+                p["sobreposicoes"] = _sobreposicoes(itens)
                 json.dump(p, open(plano_path, "w"), ensure_ascii=False, indent=1)
                 saida = saida_padrao.replace(".mp4", f"_{k + 1}.mp4")
                 editor.render(bruto, saida, images_root=pasta_imgs, surpresa=surpresa)
@@ -441,8 +573,9 @@ def editar(video_id: str):
                 _status(db, alvo_id, status="aprovacao", etapa=len(ETAPAS) - 1, progresso=100, editado_path=destino,
                         estilo_id=estilo.get("estilo_id"), estilo_versao=estilo.get("n"), produto_id=produto_id,
                         duracao_bruto=editor.duration(bruto), duracao_final=editor.duration(saida),
-                        stats={"cortes": len(trechos), "imagens": len((p["sobreposicoes"] or [{}])[0].get("arquivos", [])) if p["sobreposicoes"] else 0,
-                               "sons": len((p["sobreposicoes"] or [{}])[0].get("pontos", [])) if p["sobreposicoes"] else 0},
+                        stats={"cortes": len(trechos), "imagens": len(itens), "sons": len(itens)},
+                        imagens=[{kk: vv for kk, vv in i.items() if kk != "arquivo"} for i in itens],
+                        imagens_ajustadas=bool(linha.get("imagens_ajustadas")) and k == 0,
                         erro=None, **extra)
                 try:  # legenda/descrição/hashtags no jeito das referências de "Ganchos e Legendas"
                     fala = " ".join(f["texto"] for f in frases if any(t["s"] <= f["s"] < t["e"] for t in trechos))

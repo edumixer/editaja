@@ -20,6 +20,7 @@ import { supabase } from "@/lib/supabase";
 import { useEstilos } from "@/lib/estilos-store";
 import { Switch } from "@/components/ui/switch";
 import { PosicaoHeadline } from "@/components/headline-config";
+import { ImagensDoVideo } from "@/components/imagens-video";
 import { useVideoEditado, quandoEditado, type VideoReal } from "@/components/video-real";
 
 function PlayerReal({ v: v0, owner }: { v: Video; owner: string }) {
@@ -295,7 +296,7 @@ export default function Revisao() {
                 {v.headlineAtiva !== false ? (
                   <CardContent className="space-y-3">
                     <div className="flex gap-2">
-                      <Input value={v.headline} maxLength={80} placeholder="Escreva o texto que quiser" onChange={(e) => update(v.id, { headline: e.target.value })} />
+                      <Input value={v.headline} maxLength={80} placeholder="Escreva o texto que quiser (sem ponto final)" onChange={(e) => update(v.id, { headline: e.target.value })} onBlur={(e) => { const t = e.target.value.replace(/[\s.…]+$/, ""); if (t !== e.target.value) update(v.id, { headline: t }); }} />
                       {/cuidado|falso/i.test(v.headline) && <span className="grid size-10 shrink-0 place-items-center rounded-lg border text-lg" title="Emoji de perigo automático">🚨</span>}
                     </div>
                     <PosicaoHeadline texto={v.headline} x={v.headlinePos?.x ?? 0.5} y={v.headlinePos?.y ?? 0.24} onChange={(p) => update(v.id, { headlinePos: p })} />
@@ -303,6 +304,13 @@ export default function Revisao() {
                   </CardContent>
                 ) : <CardContent><p className="text-sm text-muted-foreground">Este vídeo vai sair sem texto na tela. Ligue de novo quando quiser.</p></CardContent>}
               </Card>
+              {modoReal && sessao && (v.status === "aprovacao" || v.status === "aprovado") && (
+                <ImagensDoVideo v={v} onRefazer={(texto) => {
+                  recusar(v.id, texto);
+                  toast("Refazendo o vídeo com as imagens", { description: `A versão ${v.versao + 1} entrou na fila. Leva de 1 a 3 minutos.` });
+                  router.push("/fila");
+                }} />
+              )}
               <Card>
                 <CardHeader className="pb-2"><CardTitle className="text-sm">Regras aplicadas · {estiloNome}</CardTitle></CardHeader>
                 <CardContent className="grid gap-2 sm:grid-cols-2">
