@@ -65,6 +65,102 @@ def _etapa(db, video_id, nome):
     _status(db, video_id, status="editando", etapa=i, progresso=round(i / len(ETAPAS) * 100, 1))
 
 
+# ---------------------------------------------------------------- andamento visível na tela Fila
+# Faixas do progresso geral (%) por etapa. A tela traduz: etapa 0 preparando, 1 transcrição, 2 cortes,
+# 3 montagem, 6 render (progresso >= 96 = finalizando).
+FAIXAS = {"preparando": (0, 0, 6), "transcricao": (1, 6, 35), "cortes": (2, 35, 45), "montagem": (3, 45, 50),
+          "render": (6, 50, 95), "finalizando": (6, 96, 99)}
+LIMITE_ARQUIVO_MB = float(os.environ.get("LIMITE_ARQUIVO_MB", "50"))   # limite por arquivo do Supabase Storage (grátis = 50)
+
+
+class _Andamento:
+    """Grava etapa e % no banco (no máximo a cada 3 s). Sem medida real, avança sozinho devagar
+    pelo tempo esperado da etapa (nunca passa de 90% da faixa); com medida real (ffmpeg), usa ela."""
+
+    def __init__(self, db, video_id):
+        import threading
+        self.db, self.id = db, video_id
+        self.etapa, self.de, self.ate, self.pct = 0, 0.0, 6.0, 0.0
+        self.esperado, self.t0, self.gravado, self.ativo = None, 0.0, 0.0, True
+        self.lock = threading.Lock()
+        threading.Thread(target=self._relogio, daemon=True).start()
+
+    def _gravar(self, forcar=False):
+        import time
+        if not self.ativo or (not forcar and time.time() - self.gravado < 3):
+            return
+        self.gravado = time.time()
+        try:
+            self.db.table("videos").update({"etapa": self.etapa, "progresso": round(self.pct, 1)}).eq("id", self.id) \
+                .eq("status", "editando").execute()
+        except Exception as e:
+            print("andamento não gravado:", e)
+
+    def fase(self, nome, esperado_s=None, de=None, ate=None):
+        import time
+        with self.lock:
+            e, d, a = FAIXAS[nome]
+            self.etapa, self.de, self.ate = e, d if de is None else de, a if ate is None else ate
+            self.pct = max(self.pct, self.de)
+            self.esperado, self.t0 = esperado_s, time.time()
+            self._gravar(forcar=True)
+
+    def fracao(self, f):
+        with self.lock:
+            self.esperado = None   # medida real: para de estimar pelo relógio
+            self.pct = max(self.pct, self.de + (self.ate - self.de) * min(max(f, 0.0), 1.0))
+            self._gravar()
+
+    def _relogio(self):
+        import math, time
+        while self.ativo:
+            time.sleep(3)
+            with self.lock:
+                if self.esperado:
+                    f = 0.9 * (1 - math.exp(-(time.time() - self.t0) / self.esperado))
+                    self.pct = max(self.pct, self.de + (self.ate - self.de) * f)
+                    self._gravar()
+
+    def parar(self):
+        self.ativo = False
+
+
+def _ffmpeg_com_progresso(run_original, total_s, ao_progresso):
+    """Troca editor.run: o ffmpeg do render principal informa quanto do vídeo já gerou (-progress)."""
+    import threading
+
+    def run(cmd):
+        if not cmd or cmd[0] != "ffmpeg" or "-filter_complex" not in cmd or not total_s:
+            return run_original(cmd)
+        cmd2 = [cmd[0], "-progress", "pipe:1", "-nostats", *cmd[1:]]
+        p = subprocess.Popen(cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        err = []
+        th = threading.Thread(target=lambda: err.extend(p.stderr), daemon=True)
+        th.start()
+        for linha in p.stdout:
+            if linha.startswith(("out_time_us=", "out_time_ms=")):
+                v = linha.split("=", 1)[1].strip()
+                if v.isdigit():
+                    ao_progresso(int(v) / 1e6 / total_s)
+        p.wait(); th.join(timeout=5)
+        if p.returncode != 0:
+            sys.stderr.write("".join(err)[-4000:])
+            raise SystemExit("falhou: ffmpeg")
+        return subprocess.CompletedProcess(cmd2, 0, "", "".join(err))
+    return run
+
+
+def _caber_no_limite(editor, saida, versao_pc_original):
+    """O armazenamento recusa arquivo acima do limite (erro 413). Se o editado passar, gera uma cópia
+    em 2 passes no maior tamanho que cabe (melhor qualidade possível nesse tamanho) e envia ela."""
+    limite = LIMITE_ARQUIVO_MB - 3   # folga
+    if os.path.getsize(saida) <= limite * 1e6:
+        return saida
+    versao_pc_original(saida, limite_mb=limite)
+    menor = saida.replace(".mp4", "_pc.mp4")
+    return menor if os.path.exists(menor) and os.path.getsize(menor) < os.path.getsize(saida) else saida
+
+
 # ---------------------------------------------------------------- produto: imagens onde a pessoa aponta
 # Palavras faladas que chamam cada etiqueta de imagem do produto (comparadas sem acento e sem maiúscula).
 GATILHOS = {
@@ -479,17 +575,22 @@ def editar(video_id: str):
     sys.path.insert(0, _editor_dir())
     import editor  # noqa: E402  (o mesmo editor.py usado hoje, com as regras fixas)
 
+    and_ = None
     with tempfile.TemporaryDirectory() as tmp:
         try:
             _etapa(db, video_id, "upload")
+            and_ = _Andamento(db, video_id)
+            mb = float((opcoes or {}).get("mb") or 50)
+            and_.fase("preparando", esperado_s=max(5, mb / 15))
             ext = pathlib.Path(v["bruto_path"]).suffix or ".mp4"
             bruto = os.path.join(tmp, f"bruto{ext}")
             with open(bruto, "wb") as f:
                 f.write(db.storage.from_("brutos").download(v["bruto_path"]))
             pasta_imgs = os.path.join(tmp, "imagens")
             imagens = _baixar_imagens_produto(db, produto_id, pasta_imgs)   # só as imagens DESTE produto
+            dur_bruto = editor.duration(bruto)
 
-            _etapa(db, video_id, "transcricao")
+            and_.fase("transcricao", esperado_s=max(10, dur_bruto * 0.6))
             frases = _transcrever(db, v, bruto, editor)
             tr_path, plano_path, saida_padrao = editor.paths(bruto)
             try:
@@ -497,7 +598,7 @@ def editar(video_id: str):
             except Exception:
                 palavras = []
 
-            _etapa(db, video_id, "cortes")
+            and_.fase("cortes", esperado_s=max(5, dur_bruto * 0.15))
             editor.plan(bruto)
             plano = json.load(open(plano_path))
             vel = float(regras.get("velocidade", 1.1))
@@ -539,8 +640,14 @@ def editar(video_id: str):
             if len(combos) > 1:
                 _status(db, video_id, variante=f"{len(combos)} combinações")
 
-            _etapa(db, video_id, "render")
+            and_.fase("montagem", esperado_s=5)
+            run_original, versao_pc_original = editor.run, editor.versao_pc
+            editor.versao_pc = lambda *a, **k: None   # a cópia "para o PC" não é usada aqui (só se passar do limite)
+            n = len(combos)
             for k, (rotulo, hi, ci, trechos) in enumerate(combos):
+                total = sum(t["e"] - t["s"] for t in trechos) / vel + 0.1   # duração esperada do vídeo final (s)
+                and_.fase("render", esperado_s=max(30, total * 6), de=50 + 45 * k / n, ate=50 + 45 * (k + 1) / n)
+                editor.run = _ffmpeg_com_progresso(run_original, total, and_.fracao)
                 p = dict(plano, trechos=trechos)
                 if hl_auto and hi is not None and hi < len(ganchos):
                     p["titulo"] = dict(plano["titulo"], texto=_sem_ponto(ganchos[hi]["texto"]), ativo=True)
@@ -553,7 +660,12 @@ def editar(video_id: str):
                 p["sobreposicoes"] = _sobreposicoes(itens)
                 json.dump(p, open(plano_path, "w"), ensure_ascii=False, indent=1)
                 saida = saida_padrao.replace(".mp4", f"_{k + 1}.mp4")
-                editor.render(bruto, saida, images_root=pasta_imgs, surpresa=surpresa)
+                try:
+                    editor.render(bruto, saida, images_root=pasta_imgs, surpresa=surpresa)
+                finally:
+                    editor.run = run_original
+                and_.fase("finalizando", esperado_s=20)
+                envio = _caber_no_limite(editor, saida, versao_pc_original)
 
                 alvo_id = video_id
                 if k > 0:  # cada combinação extra vira um vídeo próprio na tela de aprovação
@@ -563,13 +675,15 @@ def editar(video_id: str):
                     alvo_id = db.table("videos").insert(novo).execute().data[0]["id"]
                 versao = v["versao"] if k == 0 else 1
                 destino = f"{v['owner_id']}/{alvo_id}/v{versao}.mp4"
-                with open(saida, "rb") as f:
+                with open(envio, "rb") as f:
                     db.storage.from_("editados").upload(destino, f.read(), {"content-type": "video/mp4", "upsert": "true"})
                 extra = {"variante": rotulo, "hook_idx": hi, "cta_idx": ci} if rotulo else {}
                 # qual gancho este vídeo usou: alimenta o ranking "Em alta" (views por gancho e por época)
                 gtxt = (ganchos[hi]["texto"] if hi is not None and hi < len(ganchos) else None) or p["titulo"].get("texto") or (frases[0]["texto"] if frases else None)
                 if gtxt: extra["gancho_texto"] = gtxt.strip()[:300]
                 if hl_auto and p["titulo"].get("texto"): extra["headline"] = p["titulo"]["texto"].strip()[:300]
+                if alvo_id == video_id:
+                    and_.parar()   # este já está pronto; as outras versões seguem sem mexer nele
                 _status(db, alvo_id, status="aprovacao", etapa=len(ETAPAS) - 1, progresso=100, editado_path=destino,
                         estilo_id=estilo.get("estilo_id"), estilo_versao=estilo.get("n"), produto_id=produto_id,
                         duracao_bruto=editor.duration(bruto), duracao_final=editor.duration(saida),
@@ -583,8 +697,13 @@ def editar(video_id: str):
                 except Exception as e:
                     print("textos não gerados:", e)
         except Exception as e:  # deixa o erro visível na tela da fila
+            if and_:
+                and_.parar()
             _status(db, video_id, status="erro", erro=str(e)[:500])
             raise
+        finally:
+            if and_:
+                and_.parar()
 
 
 # ---------------------------------------------------------------- legendas no jeito das referências

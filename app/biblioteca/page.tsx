@@ -28,10 +28,18 @@ import { HeadlineConfig, HEADLINE_PADRAO, type HeadlineCfg } from "@/components/
 import Link from "next/link";
 import type { Upload as TusUpload } from "tus-js-client";
 import { cn } from "@/lib/utils";
+import { ExcluirDialog } from "@/components/excluir-video";
+import { BarraIndeterminada, LIMITE_UPLOAD_MB } from "@/lib/andamento";
 
 const ICONES: Record<string, React.ElementType> = { film: Film, scissors: Scissors, send: Send, sparkles: Sparkles, image: ImageIcon, music: Music };
 
-type Envio = { id: string; nome: string; mb: number; enviado: number; pausado: boolean; feito: boolean; velocidade: number; arquivo?: File; erro?: string; videoId?: string; naFila?: boolean };
+type Envio = { id: string; nome: string; mb: number; enviado: number; pausado: boolean; feito: boolean; velocidade: number; arquivo?: File; erro?: string; videoId?: string; naFila?: boolean; grande?: boolean; iniciando?: boolean };
+
+/** Mensagem clara para o erro do envio (o 413 é arquivo acima do limite do armazenamento). */
+function motivoErro(msg: string) {
+  if (/413|too large|exceeded the maximum/i.test(msg)) return `O arquivo passa do limite de ${LIMITE_UPLOAD_MB} MB por vídeo.`;
+  return "A conexão caiu.";
+}
 
 function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
   const { adicionar, modoReal, criarVideo, configurarVideo, enviarParaEdicao, update } = useStore();
@@ -43,7 +51,7 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
   const prod = produtos.find((x) => x.id === produtoId);
   // escolhas feitas no envio; valem para os vídeos quando a pessoa toca em "Editar" (também para os que ainda estão subindo)
   const escolhas = React.useRef<{ produto: { id: string; nome: string } | null; opcoes: Record<string, unknown> } | null>(null);
-  const pendentes = React.useRef<Set<string>>(new Set());   // envios já mandados para a fila, esperando terminar de subir
+  const pendentes = React.useRef<Map<string, Promise<void>>>(new Map());   // envios já mandados para a fila, esperando terminar de subir (-> gravação das escolhas)
   const videoDe = React.useRef<Record<string, { id: string; capa?: Promise<string | undefined> }>>({});
   const { estilos } = useEstilos();
   const [estiloId, setEstiloId] = React.useState("clean");
@@ -68,12 +76,13 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
   const patch = (id: string, p: Partial<Envio>) => setEnvios((es) => es.map((x) => (x.id === id ? { ...x, ...p } : x)));
 
   /** Grava as escolhas no vídeo (produto certo, estilo, headline, capa) e só então põe na fila de edição. */
-  const mandarVideo = async (envioId: string) => {
+  const mandarVideo = async (envioId: string, jaSubiu = true) => {
     const v = videoDe.current[envioId], esc = escolhas.current;
     if (!v || !esc) return;
     const capa = await v.capa;
-    await configurarVideo(v.id, esc.produto, { ...esc.opcoes, ...(capa ? { capa } : {}) });
-    await enviarParaEdicao(v.id);
+    // as escolhas ficam gravadas no vídeo na hora: se a aba fechar, a Fila ainda consegue mandar para edição
+    await configurarVideo(v.id, esc.produto, { ...esc.opcoes, ...(capa ? { capa } : {}), editar_ao_terminar: true });
+    if (jaSubiu) await enviarParaEdicao(v.id);
     setEnvios((es) => es.filter((x) => x.id !== envioId || !x.feito).map((x) => (x.id === envioId ? { ...x, naFila: true } : x)));
   };
 
@@ -91,26 +100,41 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
       videoDe.current[e.id] = { id, capa };
       patch(e.id, { videoId: id });
       let ultimo = { t: Date.now(), b: 0 };
+      // a porcentagem do envio vai para o banco (a cada ~3 s): a Fila mostra a barra mesmo em outra tela ou aparelho
+      let gravado = 0;
+      const gravar = (pct: number, forcar = false) => {
+        if (!forcar && Date.now() - gravado < 3000) return;
+        gravado = Date.now();
+        supabase!.from("videos").update({ progresso: Math.round(pct * 10) / 10 }).eq("id", id).eq("status", "enviando").then(() => {});
+      };
       tus.current[e.id] = await enviarRetomavel(e.arquivo!, caminho, {
         progresso: (b) => {
           const agora = Date.now(); const dt = (agora - ultimo.t) / 1000;
           const vel = dt > 0.5 ? (b - ultimo.b) / 1e6 / dt : undefined;
           if (dt > 0.5) ultimo = { t: agora, b };
-          patch(e.id, { enviado: b / 1e6, ...(vel != null ? { velocidade: vel } : {}) });
+          patch(e.id, { enviado: b / 1e6, iniciando: false, ...(vel != null ? { velocidade: vel } : {}) });
+          gravar((b / (e.arquivo!.size || 1)) * 100);
         },
-        ok: async () => { patch(e.id, { feito: true, enviado: e.mb }); if (pendentes.current.has(e.id)) { pendentes.current.delete(e.id); await mandarVideo(e.id); } },
-        erro: (err) => patch(e.id, { erro: err.message, pausado: true }),
+        ok: async () => {
+          patch(e.id, { feito: true, enviado: e.mb, iniciando: false }); gravar(100, true);
+          const esc = pendentes.current.get(e.id);
+          if (esc) { pendentes.current.delete(e.id); await esc.catch(() => {}); await enviarParaEdicao(id); }
+        },
+        erro: (err) => patch(e.id, { erro: motivoErro(err.message), pausado: true, iniciando: false }),
       });
-    } catch (err) { patch(e.id, { erro: (err as Error).message, pausado: true }); }
+    } catch (err) { patch(e.id, { erro: motivoErro((err as Error).message), pausado: true, iniciando: false }); }
   };
 
   const addFiles = (files: (File | { name: string; size: number })[]) => {
     const novos: Envio[] = files.map((f) => ({
       id: Math.random().toString(36).slice(2), nome: f.name, mb: Math.max(1, Math.round(f.size / 1e6) || 420), enviado: 0, pausado: false, feito: false, velocidade: 0,
       arquivo: modoReal && f instanceof File ? f : undefined,
+      grande: modoReal && f.size > LIMITE_UPLOAD_MB * 1024 * 1024,
+      iniciando: modoReal && f instanceof File,
     }));
     setEnvios((es) => [...es, ...novos]);
-    novos.filter((n) => n.arquivo).forEach(iniciarReal);
+    // vídeo acima do limite nem começa a subir (o armazenamento recusaria no fim, com erro 413)
+    novos.filter((n) => n.arquivo && !n.grande).forEach(iniciarReal);
   };
   const pausar = (e: Envio) => {
     const up = tus.current[e.id];
@@ -119,7 +143,7 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
   };
 
   const exemplo = () => addFiles([{ name: "creme_noite_bruto.mp4", size: 860e6 }, { name: "fone_bluetooth_unboxing.mov", size: 1.4e9 }]);
-  const prontos = envios.filter((e) => e.feito && !e.naFila);
+  const prontos = envios.filter((e) => e.feito && !e.naFila && !e.grande);
   const subindo = modoReal ? envios.filter((e) => !e.feito && e.videoId && !e.erro && !pendentes.current.has(e.id)) : [];
   const paraEditar = [...prontos, ...subindo];
   // prévia de ganchos/CTAs: lê a fala do vídeo enviado (com vários vídeos, cada um é lido na hora de editar)
@@ -135,8 +159,8 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
         opcoes: { surpresa: unboxing, estilo_id: estiloId, combinacoes: combFinal, headline },
       };
       try {
-        await Promise.all(prontos.map((e) => mandarVideo(e.id)));
-        subindo.forEach((e) => pendentes.current.add(e.id));
+        const gravando = subindo.map((e) => { const p = mandarVideo(e.id, false); pendentes.current.set(e.id, p); return p; });
+        await Promise.all([...prontos.map((e) => mandarVideo(e.id)), ...gravando]);
       } catch (err) { toast.error("Não deu para pôr na fila", { description: (err as Error).message }); return; }
     }
     if (!modoReal) prontos.forEach((e) => {
@@ -145,7 +169,7 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
       else if (headline.modo === "manual" && headline.texto.trim()) update(id, { headline: headline.texto.trim(), headlinePos: { x: headline.x, y: headline.y } });
     });
     const n = combFinal.automatico ? 0 : Math.max(1, combFinal.hooks.filter((x) => x.texto.trim()).length) * Math.max(1, combFinal.ctas.filter((x) => x.texto.trim()).length);
-    toast.success(`${paraEditar.length} vídeo(s) na fila de edição${prod ? ` · ${prod.nome}` : ""}`, { description: subindo.length ? "Os que ainda estão subindo entram na fila assim que terminarem. Deixe esta aba aberta até lá." : n > 1 ? `Cada bruto vira ${n} vídeos (ganchos × CTAs). Você recebe um aviso quando estiverem prontos.` : "Você recebe um aviso quando estiverem prontos para aprovar." });
+    toast.success(`${paraEditar.length} vídeo(s) na fila de edição${prod ? ` · ${prod.nome}` : ""}`, { description: subindo.length ? "Os que ainda estão subindo entram na fila assim que terminarem. Acompanhe a barra de envio na Fila; não feche o site até lá." : n > 1 ? `Cada bruto vira ${n} vídeos (ganchos × CTAs). Você recebe um aviso quando estiverem prontos.` : "Você recebe um aviso quando estiverem prontos para aprovar." });
     setEnvios((es) => es.filter((e) => !e.feito));
     onOpenChange(false);
     router.push("/fila");
@@ -168,7 +192,7 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
         >
           <div className="brand-gradient grid size-12 place-items-center rounded-2xl text-white shadow-lg shadow-primary/30"><CloudUpload className="size-6" /></div>
           <p className="mt-3 font-medium">Toque para escolher ou arraste aqui</p>
-          <p className="mt-1 text-xs text-muted-foreground">MP4, MOV ou HEVC do celular · até 4 GB por vídeo</p>
+          <p className="mt-1 text-xs text-muted-foreground">MP4, MOV ou HEVC do celular · até {LIMITE_UPLOAD_MB} MB por vídeo · pode enviar vários de uma vez</p>
           <input ref={inputRef} type="file" accept="video/*" multiple className="hidden" onChange={(e) => e.target.files && addFiles(Array.from(e.target.files))} />
         </div>
         {envios.length === 0 && !modoReal && (
@@ -187,20 +211,23 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium">{e.nome}</p>
                       <p className="text-xs tabular-nums text-muted-foreground">
-                        {e.feito ? <span className="inline-flex items-center gap-1 text-success"><Check className="size-3" /> Enviado · {e.mb} MB</span>
-                          : e.erro ? `Conexão caiu em ${Math.round(pct)}% · toque em ▶ para retomar`
+                        {e.grande ? <span className="text-destructive">{e.mb} MB: passa do limite de {LIMITE_UPLOAD_MB} MB por vídeo. Corte ou exporte em tamanho menor e envie de novo.</span>
+                          : e.feito ? <span className="inline-flex items-center gap-1 text-success"><Check className="size-3" /> Enviado · {e.mb} MB{e.naFila ? " · entra na fila" : ""}</span>
+                          : e.iniciando ? "Preparando o envio…"
+                          : e.erro ? `${e.erro} Parou em ${Math.round(pct)}% · toque em ▶ para tentar de novo`
                           : e.pausado ? `Pausado em ${Math.round(pct)}% · retoma da parte ${Math.floor((e.enviado / e.mb) * partes) + 1} de ${partes}`
                           : `${Math.round(e.enviado)} de ${e.mb} MB · ${e.velocidade.toFixed(0)} MB/s · parte ${Math.floor((e.enviado / e.mb) * partes) + 1}/${partes}`}
                       </p>
                     </div>
-                    {!e.feito && (
+                    {!e.feito && !e.grande && !e.iniciando && (
                       <Button variant="ghost" size="icon-sm" aria-label={e.pausado ? "Retomar" : "Pausar"} onClick={() => pausar(e)}>
                         {e.pausado ? <Play /> : <Pause />}
                       </Button>
                     )}
                     <Button variant="ghost" size="icon-sm" aria-label="Remover" onClick={() => setEnvios((es) => es.filter((x) => x.id !== e.id))}><X /></Button>
                   </div>
-                  {!e.feito && <Progress value={pct} className="mt-2.5 h-1.5" />}
+                  {!e.feito && !e.grande && (e.iniciando ? <BarraIndeterminada className="mt-2.5 h-1.5" />
+                    : <div className="mt-2.5 flex items-center gap-2"><Progress value={pct} className="h-1.5" /><span className="w-9 shrink-0 text-right text-[11px] font-medium tabular-nums">{Math.round(pct)}%</span></div>)}
                 </div>
               );
             })}
@@ -316,47 +343,6 @@ function TileReal({ a, onClick, onExcluir }: { a: Arquivo & { video: Video }; on
         <p className="mt-0.5 text-[11px] text-muted-foreground">{a.tamanho} · {a.quando}</p>
       </div>
     </Card>
-  );
-}
-
-/** Confirmação antes de apagar: some da conta e do armazenamento, sem volta. */
-function ExcluirDialog({ video, onClose }: { video: (Video & { origemId?: string; statusBanco?: string }) | null; onClose: () => void }) {
-  const { videos, excluirVideo } = useStore();
-  const [apagando, setApagando] = React.useState(false);
-  const versoes = video ? videos.filter((v) => (v as Video & { origemId?: string }).origemId === video.id).length : 0;
-  const editando = video?.statusBanco === "editando";
-  const confirmar = async () => {
-    if (!video) return;
-    setApagando(true);
-    try {
-      await excluirVideo(video.id);
-      toast.success("Vídeo excluído", { description: versoes ? `As ${versoes} versões dele também foram apagadas.` : undefined });
-      onClose();
-    } catch (e) {
-      toast.error("Não deu para excluir", { description: (e as Error).message });
-    } finally { setApagando(false); }
-  };
-  return (
-    <Dialog open={!!video} onOpenChange={(o) => { if (!o && !apagando) onClose(); }}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Excluir “{video?.titulo}”?</DialogTitle>
-          <DialogDescription>
-            O vídeo bruto, o editado e a capa são apagados da sua conta para sempre. Não dá para desfazer.
-          </DialogDescription>
-        </DialogHeader>
-        {(versoes > 0 || editando) && (
-          <div className="grid gap-1.5 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs">
-            {versoes > 0 && <p>Este vídeo tem <b>{versoes} {versoes === 1 ? "versão" : "versões"}</b> (ganchos × CTAs) que também serão excluídas.</p>}
-            {editando && <p>Ele está sendo editado agora. A edição será descartada.</p>}
-          </div>
-        )}
-        <DialogFooter>
-          <Button variant="outline" disabled={apagando} onClick={onClose}>Cancelar</Button>
-          <Button variant="destructive" disabled={apagando} onClick={confirmar}><Trash2 /> {apagando ? "Excluindo…" : "Excluir"}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
 

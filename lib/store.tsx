@@ -45,7 +45,7 @@ type Linha = {
   versao: number; duracao_bruto: number | null; duracao_final: number | null; stats: { cortes?: number; imagens?: number; sons?: number } | null;
   legenda: string | null; descricao: string | null; hashtags: string[] | null; agendado_para: string | null; created_at: string;
   opcoes: Record<string, unknown> | null; erro: string | null; comentarios?: { texto: string; created_at: string }[];
-  editado_path?: string | null; editado_em?: string | null; origem_id?: string | null; bruto_path?: string | null; owner_id?: string; headline_ativa?: boolean; headline_x?: number | null; headline_y?: number | null; surpresas?: Video["surpresas"] | null;
+  editado_path?: string | null; editado_em?: string | null; updated_at?: string; origem_id?: string | null; bruto_path?: string | null; owner_id?: string; headline_ativa?: boolean; headline_x?: number | null; headline_y?: number | null; surpresas?: Video["surpresas"] | null;
 };
 function hueDe(id: string) { let h = 0; for (const c of id) h = (h * 31 + c.charCodeAt(0)) % 360; return h; }
 function paraVideo(l: Linha): Video {
@@ -60,7 +60,7 @@ function paraVideo(l: Linha): Video {
     surpresas: l.surpresas ?? undefined,
     comentarios: (l.comentarios ?? []).map((c) => ({ autor: "Você", texto: c.texto, quando: new Date(c.created_at).toLocaleString("pt-BR") })),
     // extras do modo real (lidos pela Aprovação via VideoReal em components/video-real.tsx)
-    ...{ editadoPath: l.editado_path ?? undefined, editadoEm: l.editado_em ?? undefined, erro: l.erro ?? undefined, statusBanco: l.status,
+    ...{ editadoPath: l.editado_path ?? undefined, editadoEm: l.editado_em ?? undefined, atualizadoEm: l.updated_at, opcoes: l.opcoes ?? undefined, erro: l.erro ?? undefined, statusBanco: l.status,
       brutoPath: l.bruto_path ?? undefined, ownerId: l.owner_id, origemId: l.origem_id ?? undefined, capaPath: (l.opcoes as { capa?: string } | null)?.capa },
   } as Video;
 }
