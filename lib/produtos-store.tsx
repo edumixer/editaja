@@ -30,12 +30,12 @@ const KEY = "editaja:produtos:v1";
 const KEY_IMPORTADO = "editaja:produtos:importado";
 const KEY_CATEGORIAS = "editaja:categorias:v1";
 const HUES_CATEGORIA = [285, 200, 160, 25, 330, 95, 245, 55];
-const slug = (s: string) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+const slug = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 const hueDe = (id: string) => { let h = 0; for (const c of id) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
 const tamanho = (bytes: number) => (bytes > 1e6 ? `${(bytes / 1e6).toFixed(1).replace(".", ",")} MB` : `${Math.max(1, Math.round(bytes / 1e3))} KB`);
 const uuid = () => (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID()
   : "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) => (+c ^ (Math.random() * 16) >> (+c / 4)).toString(16)));
-const nomeArquivo = (n: string) => n.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^\w.\-]+/g, "_");
+const nomeArquivo = (n: string) => n.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^\w.\-]+/g, "_");
 const exemplo = (nome: string) => /gr[eê]mio/i.test(nome);
 
 /** Lê a imagem como data URL (só no modo demonstração, para aparecer a miniatura). */
