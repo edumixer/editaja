@@ -5,3 +5,10 @@ node_modules
 *.bak*
 tsconfig.tsbuildinfo
 __pycache__/
+
+# ambientes e segredos
+.venv/
+.vercel
+*.pem
+*.key
+*.zip

@@ -23,6 +23,8 @@ type Ctx = {
   enviarParaEdicao: (id: string) => Promise<void>;
   /** Apaga o vídeo (e as versões ganchos × CTAs dele) do banco e os arquivos do armazenamento. */
   excluirVideo: (id: string) => Promise<void>;
+  /** Apaga vários de uma vez (seleção na Aprovação). Original selecionado leva as versões dele junto. */
+  excluirVarios: (ids: string[]) => Promise<number>;
   agendar: (id: string, quando: string) => void;
   publicarAgora: (id: string) => void;
   reset: () => void;
@@ -219,6 +221,23 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         const { error } = await supabase.from("videos").delete().eq("id", id);   // versões filhas saem junto (cascade)
         if (error) throw error;
       } catch (e) { await recarregar(); throw e; }
+    },
+    excluirVarios: async (escolhidos) => {
+      type Extra = Video & { origemId?: string; ownerId?: string };
+      const lista = videos as Extra[];
+      const ids = Array.from(new Set([...escolhidos, ...lista.filter((v) => v.origemId && escolhidos.includes(v.origemId)).map((v) => v.id)]));
+      if (!ids.length) return 0;
+      setVideos((vs) => vs.filter((v) => !ids.includes(v.id)));
+      if (!supabase) return ids.length;
+      try {
+        // arquivos por dono (Supabase antigos + R2 novos), igual à exclusão de um vídeo só
+        const porDono = new Map<string, string[]>();
+        for (const id of ids) { const o = lista.find((v) => v.id === id)?.ownerId; if (o) porDono.set(o, [...(porDono.get(o) ?? []), id]); }
+        for (const [owner, dele] of porDono) await apagarPastas(owner, dele);
+        const { error } = await supabase.from("videos").delete().in("id", ids);
+        if (error) throw error;
+      } catch (e) { await recarregar(); throw e; }
+      return ids.length;
     },
     agendar: (id, quando) => update(id, { status: "agendado", agendadoPara: quando }),
     publicarAgora: (id) => update(id, { status: "publicado", agendadoPara: new Date().toISOString() }),

@@ -35,7 +35,8 @@ export function EstilosProvider({ children }: { children: React.ReactNode }) {
     try {
       const raw = localStorage.getItem(KEY);
       if (raw) {
-        const d = JSON.parse(raw);
+        // nomes antigos guardados no navegador ("Clean do Eduardo" etc.) viram os nomes neutros de hoje
+        const d = JSON.parse(raw.replace(/Clean do Eduardo/g, "Clean").replace(/Pedido do Eduardo/g, "Regra padrão").replace(/Recusa do Eduardo/g, "Recusa aprendida"));
         setEstilos(d.estilos); setReferencias((d.referencias as Referencia[]).filter((x) => !ex(x))); setSugestoes((d.sugestoes as Sugestao[]).filter((x) => !ex(x)));
       }
     } catch {}
