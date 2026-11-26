@@ -4,11 +4,11 @@ import { Film, Play } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
 import type { Video } from "@/lib/data";
+import { linkAssinado } from "@/lib/armazenamento";
 
 /** Campos do modo real que a capa usa (vêm da linha do banco, ver lib/store.tsx). */
 type Extra = { capaPath?: string; brutoPath?: string; editadoPath?: string; ownerId?: string };
 
-import { linkAssinado } from "@/lib/armazenamento";
 /** Link assinado (cache de 50 min) de um arquivo, no R2 (caminho "r2:…") ou no Supabase. */
 export { linkAssinado };
 
