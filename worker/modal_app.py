@@ -70,7 +70,7 @@ def _etapa(db, video_id, nome):
 # 3 montagem, 6 render (progresso >= 96 = finalizando).
 FAIXAS = {"preparando": (0, 0, 6), "transcricao": (1, 6, 35), "cortes": (2, 35, 45), "montagem": (3, 45, 50),
           "render": (6, 50, 95), "finalizando": (6, 96, 99)}
-LIMITE_ARQUIVO_MB = float(os.environ.get("LIMITE_ARQUIVO_MB", "50"))   # limite por arquivo do Supabase Storage (grátis = 50)
+LIMITE_ARQUIVO_MB = float(os.environ.get("LIMITE_ARQUIVO_MB", "1000"))   # limite por arquivo do Supabase Storage (Pro: 1 GB definido no painel; grátis = 50)
 
 
 class _Andamento:
@@ -655,7 +655,7 @@ def detectar_falas(video_id: str):
     return det
 
 
-@app.function(secrets=[secret], cpu=4.0, memory=8192, timeout=60 * 45)
+@app.function(secrets=[secret], cpu=4.0, memory=8192, timeout=60 * 120)   # vídeos de 5 min com 7-9 versões
 def editar(video_id: str):
     db = _db()
     v = db.table("videos").select("*").eq("id", video_id).single().execute().data
