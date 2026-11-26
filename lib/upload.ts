@@ -11,7 +11,8 @@ export async function enviarRetomavel(
   arquivo: File, caminho: string,
   on: { progresso: (enviados: number, total: number) => void; ok: () => void; erro: (e: Error) => void },
 ) {
-  if (ehR2(caminho)) return enviarR2(arquivo, caminho, on);   // vídeos novos: Cloudflare R2, sem limite de 50 MB
+  // vídeos novos: Cloudflare R2, sem limite de 50 MB. Quem chama só usa start() e abort(), que os dois envios têm.
+  if (ehR2(caminho)) return enviarR2(arquivo, caminho, on) as unknown as tus.Upload;
   const { data } = await supabase!.auth.getSession();
   const token = data.session?.access_token;
   const up = new tus.Upload(arquivo, {
