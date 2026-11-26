@@ -3,6 +3,7 @@ import * as React from "react";
 import type { Session } from "@supabase/supabase-js";
 import { VIDEOS_INICIAIS, ETAPAS, type Video, type Status } from "./data";
 import { modoReal, supabase } from "./supabase";
+import { R2_ATIVO, apagarPastas } from "./armazenamento";
 import { gerarComReferencias } from "./textos";
 import { textosSalvos } from "./textos-store";
 import type { Produto } from "./produtos";
@@ -187,7 +188,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         .insert({ titulo: nome.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " "), produto: produto || null, status: "enviando", opcoes: { ...opcoes, mb } })
         .select("id, owner_id").single();
       if (error) throw error;
-      const caminho = `${data.owner_id}/${data.id}/${nome.replace(/[^\w.\-]+/g, "_")}`;
+      // vídeo novo vai para o R2 quando ativo ("r2:" no começo); a capa e a transcrição seguem no Supabase
+      const caminho = `${R2_ATIVO ? "r2:" : ""}${data.owner_id}/${data.id}/${nome.replace(/[^\w.\-]+/g, "_")}`;
       await supabase!.from("videos").update({ bruto_path: caminho }).eq("id", data.id);
       return { id: data.id, caminho, owner: data.owner_id };
     },
@@ -212,12 +214,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         if (owner) {
           // arquivos: brutos/<dono>/<id>/… (bruto, capa, transcrição) e editados/<dono>/<id>/… de cada versão.
           // Uma versão (gancho × CTA) usa o bruto do original: só some junto com o original.
-          for (const bucket of ["brutos", "editados"]) for (const vid of ids) {
-            const pasta = `${owner}/${vid}`;
-            const { data } = await supabase.storage.from(bucket).list(pasta, { limit: 1000 });
-            const caminhos = (data ?? []).map((f) => `${pasta}/${f.name}`);
-            if (caminhos.length) await supabase.storage.from(bucket).remove(caminhos);
-          }
+          await apagarPastas(owner, ids);   // Supabase (antigos) e R2 (novos)
         }
         const { error } = await supabase.from("videos").delete().eq("id", id);   // versões filhas saem junto (cascade)
         if (error) throw error;

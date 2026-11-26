@@ -8,17 +8,9 @@ import type { Video } from "@/lib/data";
 /** Campos do modo real que a capa usa (vêm da linha do banco, ver lib/store.tsx). */
 type Extra = { capaPath?: string; brutoPath?: string; editadoPath?: string; ownerId?: string };
 
-const cache = new Map<string, { url: string; ate: number }>();
-/** Link assinado (cache de 50 min) de um arquivo do Storage. */
-export async function linkAssinado(bucket: string, caminho: string): Promise<string | null> {
-  const k = `${bucket}/${caminho}`;
-  const c = cache.get(k);
-  if (c && c.ate > Date.now()) return c.url;
-  const { data } = await supabase!.storage.from(bucket).createSignedUrl(caminho, 3600);
-  if (!data?.signedUrl) return null;
-  cache.set(k, { url: data.signedUrl, ate: Date.now() + 50 * 60_000 });
-  return data.signedUrl;
-}
+import { linkAssinado } from "@/lib/armazenamento";
+/** Link assinado (cache de 50 min) de um arquivo, no R2 (caminho "r2:…") ou no Supabase. */
+export { linkAssinado };
 
 /** Arquivo para assistir: o editado quando existe, senão o bruto enviado. */
 export function fonteDoVideo(v: Video): { bucket: string; caminho: string } | null {

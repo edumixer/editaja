@@ -21,8 +21,11 @@ export function etapaUI(etapa: number, progresso: number) {
   return Math.max(0, etapa);
 }
 
-/** Limite de tamanho por arquivo do armazenamento (Supabase grátis = 50 MB). Mude NEXT_PUBLIC_LIMITE_UPLOAD_MB ao trocar de plano. */
-export const LIMITE_UPLOAD_MB = Number(process.env.NEXT_PUBLIC_LIMITE_UPLOAD_MB || 50);
+/**
+ * Limite de tamanho por vídeo. Com os vídeos no Cloudflare R2 (NEXT_PUBLIC_ARMAZENAMENTO=r2) é 3 GB
+ * (um vídeo de 5 min em 4K do iPhone tem ~1 GB); só no Supabase grátis é 50 MB. NEXT_PUBLIC_LIMITE_UPLOAD_MB muda o valor.
+ */
+export const LIMITE_UPLOAD_MB = Number(process.env.NEXT_PUBLIC_LIMITE_UPLOAD_MB || (process.env.NEXT_PUBLIC_ARMAZENAMENTO === "r2" ? 3000 : 50));
 
 export function fmtRestante(s: number) {
   if (s < 45) return "menos de 1 min";

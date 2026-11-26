@@ -9,6 +9,7 @@ import type { VideoReal as VideoRealBase } from "@/components/video-real";
 /** Campos extras da linha do banco usados aqui (ver lib/store.tsx). */
 type VideoReal = VideoRealBase & { atualizadoEm?: string; brutoPath?: string; opcoes?: { editar_ao_terminar?: boolean } };
 import { supabase } from "@/lib/supabase";
+import { arquivoExiste } from "@/lib/armazenamento";
 import type { Video } from "@/lib/data";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
@@ -77,9 +78,7 @@ function useBrutoChegou(v: VideoReal, checar: boolean) {
   const [ok, setOk] = React.useState<boolean | undefined>(undefined);
   React.useEffect(() => {
     if (!checar || !supabase || !v.brutoPath) return;
-    const i = v.brutoPath.lastIndexOf("/");
-    supabase.storage.from("brutos").list(v.brutoPath.slice(0, i), { search: v.brutoPath.slice(i + 1) })
-      .then(({ data }) => setOk(!!data?.some((f) => f.name === v.brutoPath!.slice(i + 1))));
+    arquivoExiste("brutos", v.brutoPath).then(setOk);
   }, [checar, v.brutoPath]);
   return ok;
 }

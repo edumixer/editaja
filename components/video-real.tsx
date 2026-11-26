@@ -2,6 +2,7 @@
 import * as React from "react";
 import { Loader2, Play } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { linkAssinado } from "@/lib/armazenamento";
 import { cn } from "@/lib/utils";
 import type { Video } from "@/lib/data";
 
@@ -29,9 +30,9 @@ export function useVideoEditado(owner: string | undefined, id: string, versao: n
     setUrl(null); setErro(false);
     // usa o caminho que o editor gravou no banco; se não tiver, o caminho padrão
     const alvo = caminho || `${owner}/${id}/v${versao}.mp4`;
-    supabase.storage.from("editados").createSignedUrl(alvo, 3600).then(({ data }) => {
+    linkAssinado("editados", alvo).then((u) => {   // R2 (novos) ou Supabase (antigos)
       if (!vivo) return;
-      if (data?.signedUrl) setUrl(data.signedUrl); else setErro(true);
+      if (u) setUrl(u); else setErro(true);
     });
     return () => { vivo = false; };
   }, [owner, id, versao, caminho, pronto]);

@@ -26,7 +26,6 @@ import { useProdutos } from "@/lib/produtos-store";
 import { HooksCtas, quantosVideos, type Combinacoes } from "@/components/hooks-ctas";
 import { HeadlineConfig, HEADLINE_PADRAO, type HeadlineCfg } from "@/components/headline-config";
 import Link from "next/link";
-import type { Upload as TusUpload } from "tus-js-client";
 import { cn } from "@/lib/utils";
 import { ExcluirDialog } from "@/components/excluir-video";
 import { BarraIndeterminada, LIMITE_UPLOAD_MB } from "@/lib/andamento";
@@ -43,7 +42,7 @@ function motivoErro(msg: string) {
 
 function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
   const { adicionar, modoReal, criarVideo, configurarVideo, enviarParaEdicao, update } = useStore();
-  const tus = React.useRef<Record<string, TusUpload>>({});
+  const tus = React.useRef<Record<string, { start: () => void; abort: () => void }>>({});   // envio em andamento (R2 ou Supabase)
   const router = useRouter();
   const [envios, setEnvios] = React.useState<Envio[]>([]);
   const { produtos } = useProdutos();

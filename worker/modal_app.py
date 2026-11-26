@@ -32,7 +32,7 @@ MODELO_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-sma
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("ffmpeg", "fonts-dejavu-core", "fonts-noto-color-emoji", "fonts-inter", "curl")
-    .pip_install("pywhispercpp", "Pillow", "supabase>=2.4", "fastapi[standard]", "anthropic")
+    .pip_install("pywhispercpp", "Pillow", "supabase>=2.4", "fastapi[standard]", "anthropic", "boto3")
     # modelo de voz baixado na montagem da imagem (não precisa subir 180 MB do seu PC)
     .run_commands(f"mkdir -p /editor/modelos && curl -L --fail -o /editor/modelos/ggml-small-q5_1.bin {MODELO_URL}")
     .add_local_file(str(SISTEMA / "editor.py"), "/editor/editor.py")
@@ -41,6 +41,8 @@ image = (
 
 app = modal.App("editaja-worker", image=image)
 secret = modal.Secret.from_name("SUPABASE")  # secret criado no site do Modal com esse nome
+# Cloudflare R2 (vídeos brutos e editados): secret "R2" com R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET
+segredos = [secret, modal.Secret.from_name("R2")]
 
 ETAPAS = ["upload", "transcricao", "cortes", "velocidade", "sons", "imagens", "render"]
 
@@ -54,6 +56,39 @@ def _editor_dir():
 def _db():
     from supabase import create_client
     return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
+
+
+# ---------------------------------------------------------------- onde ficam os vídeos
+# Caminho no banco começando com "r2:" = arquivo no Cloudflare R2 (chave "<bucket>/<dono>/<id>/arquivo").
+# Sem "r2:" = vídeo antigo, no Supabase Storage. Vídeos editados novos vão para o R2 quando ele está configurado.
+R2_ATIVO = all(os.environ.get(k) for k in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET"))
+
+
+def _r2():
+    import boto3
+    from botocore.config import Config
+    return boto3.client("s3", endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
+                        aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"], aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+                        region_name="auto", config=Config(signature_version="s3v4", retries={"max_attempts": 6, "mode": "standard"}))
+
+
+def _baixar_video(db, bucket, caminho, destino):
+    """Baixa o vídeo para o disco (do R2 em partes, sem passar tudo pela memória; ou do Supabase)."""
+    if caminho.startswith("r2:"):
+        _r2().download_file(os.environ["R2_BUCKET"], f"{bucket}/{caminho[3:]}", destino)
+    else:
+        with open(destino, "wb") as f:
+            f.write(db.storage.from_(bucket).download(caminho))
+
+
+def _subir_video(db, bucket, caminho, arquivo):
+    """Envia o vídeo editado. Devolve o caminho para gravar no banco ("r2:..." quando foi para o R2)."""
+    if R2_ATIVO:
+        _r2().upload_file(arquivo, os.environ["R2_BUCKET"], f"{bucket}/{caminho}", ExtraArgs={"ContentType": "video/mp4"})
+        return "r2:" + caminho
+    with open(arquivo, "rb") as f:
+        db.storage.from_(bucket).upload(caminho, f.read(), {"content-type": "video/mp4", "upsert": "true"})
+    return caminho
 
 
 def _status(db, video_id, **campos):
@@ -70,7 +105,7 @@ def _etapa(db, video_id, nome):
 # 3 montagem, 6 render (progresso >= 96 = finalizando).
 FAIXAS = {"preparando": (0, 0, 6), "transcricao": (1, 6, 35), "cortes": (2, 35, 45), "montagem": (3, 45, 50),
           "render": (6, 50, 95), "finalizando": (6, 96, 99)}
-LIMITE_ARQUIVO_MB = float(os.environ.get("LIMITE_ARQUIVO_MB", "1000"))   # limite por arquivo do Supabase Storage (Pro: 1 GB definido no painel; grátis = 50)
+LIMITE_ARQUIVO_MB = float(os.environ.get("LIMITE_ARQUIVO_MB") or (4900 if R2_ATIVO else 50))   # por arquivo: R2 = 5 GB por envio simples; Supabase grátis = 50
 
 
 class _Andamento:
@@ -617,7 +652,7 @@ def _versoes_em_paralelo(db, v, combos, hooks, ctas, produto_id):
 def _transcrever(db, v, bruto, editor):
     """Transcreve uma vez só: guarda brutos/<dono>/<id>/transcricao.json e reaproveita (prévia de ganchos e edição)."""
     tr_path = editor.paths(bruto)[0]
-    cache = str(pathlib.PurePosixPath(v["bruto_path"]).parent / "transcricao.json")
+    cache = str(pathlib.PurePosixPath(v["bruto_path"].removeprefix("r2:")).parent / "transcricao.json")   # fica no Supabase (pequeno)
     try:
         with open(tr_path, "wb") as f:
             f.write(db.storage.from_("brutos").download(cache))
@@ -631,7 +666,7 @@ def _transcrever(db, v, bruto, editor):
     return (json.load(open(tr_path)).get("frases") or []) if os.path.exists(tr_path) else []
 
 
-@app.function(secrets=[secret], cpu=4.0, memory=4096, timeout=60 * 15)
+@app.function(secrets=segredos, cpu=4.0, memory=4096, timeout=60 * 15)
 def detectar_falas(video_id: str):
     """Prévia de "Hooks e CTAs": transcreve o bruto e marca os ganchos e CTAs que a pessoa FALOU (com tempos)."""
     import datetime
@@ -642,8 +677,7 @@ def detectar_falas(video_id: str):
     try:
         with tempfile.TemporaryDirectory() as tmp:
             bruto = os.path.join(tmp, "bruto" + (pathlib.Path(v["bruto_path"]).suffix or ".mp4"))
-            with open(bruto, "wb") as f:
-                f.write(db.storage.from_("brutos").download(v["bruto_path"]))
+            _baixar_video(db, "brutos", v["bruto_path"], bruto)
             frases = _transcrever(db, v, bruto, editor)
             hooks, ctas, fonte = _detectar_hooks_ctas(frases, editor.duration(bruto))
         r = lambda xs, p: [{"id": f"{p}{k + 1}", "texto": x["texto"].strip(), "s": round(x["s"], 2), "e": round(x["e"], 2)} for k, x in enumerate(xs)]
@@ -655,7 +689,7 @@ def detectar_falas(video_id: str):
     return det
 
 
-@app.function(secrets=[secret], cpu=4.0, memory=8192, timeout=60 * 120)   # vídeos de 5 min com 7-9 versões
+@app.function(secrets=segredos, cpu=4.0, memory=8192, timeout=60 * 120)   # vídeos de 5 min com 7-9 versões
 def editar(video_id: str):
     db = _db()
     v = db.table("videos").select("*").eq("id", video_id).single().execute().data
@@ -689,8 +723,7 @@ def editar(video_id: str):
             and_.fase("preparando", esperado_s=max(5, mb / 15))
             ext = pathlib.Path(v["bruto_path"]).suffix or ".mp4"
             bruto = os.path.join(tmp, f"bruto{ext}")
-            with open(bruto, "wb") as f:
-                f.write(db.storage.from_("brutos").download(v["bruto_path"]))
+            _baixar_video(db, "brutos", v["bruto_path"], bruto)
             pasta_imgs = os.path.join(tmp, "imagens")
             imagens = _baixar_imagens_produto(db, produto_id, pasta_imgs)   # só as imagens DESTE produto
             categorias = _carregar_categorias(db, v["owner_id"])            # categorias criadas pela pessoa (ex.: "Oficial")
@@ -784,8 +817,7 @@ def editar(video_id: str):
                     alvo_id = db.table("videos").insert(novo).execute().data[0]["id"]
                 versao = v["versao"] if k == 0 else 1
                 destino = f"{v['owner_id']}/{alvo_id}/v{versao}.mp4"
-                with open(envio, "rb") as f:
-                    db.storage.from_("editados").upload(destino, f.read(), {"content-type": "video/mp4", "upsert": "true"})
+                destino = _subir_video(db, "editados", destino, envio)   # "r2:..." quando foi para o R2
                 extra = {"variante": rotulo, "hook_idx": hi, "cta_idx": ci} if rotulo else {}
                 # qual gancho este vídeo usou: alimenta o ranking "Em alta" (views por gancho e por época)
                 gtxt = (ganchos[hi]["texto"] if hi is not None and hi < len(ganchos) else None) or p["titulo"].get("texto") or (frases[0]["texto"] if frases else None)
@@ -851,7 +883,7 @@ def _escrever_textos(db, v, produto, fala):
             "hashtags": tags[:6]}
 
 
-@app.function(secrets=[secret], timeout=120)
+@app.function(secrets=segredos, timeout=120)
 def escrever_roteiro(roteiro_id: str):
     """Roteiros (opcional): escreve o meio do vídeo com as palavras e as imagens do produto."""
     db = _db()
@@ -891,7 +923,7 @@ def _frames(video, duracao, pasta, n=8):
     return out
 
 
-@app.function(secrets=[secret], cpu=4.0, memory=8192, timeout=60 * 20)
+@app.function(secrets=segredos, cpu=4.0, memory=8192, timeout=60 * 20)
 def analisar_referencia(referencia_id: str):
     """Registra tudo do vídeo de referência: fala, cortes, pausas, legendas (fonte, tamanho, cor, posição),
     headline, imagens e sons. Grava em referencias.analise e cria sugestões de regra para o estilo."""
@@ -951,7 +983,7 @@ def analisar_referencia(referencia_id: str):
                                                            "tipo": "preferencia", "origem": r["nome"]}}}).execute()
 
 
-@app.function(secrets=[secret], cpu=0.25, memory=512, timeout=120, schedule=modal.Period(minutes=1))
+@app.function(secrets=segredos, cpu=0.25, memory=512, timeout=120, schedule=modal.Period(minutes=1))
 def vigiar():
     """A cada 1 min: avisa que o editor está ligado (tela Fila mostra "Ligado") e manda editar
     cada vídeo que estiver na fila, cada um na sua máquina. Funciona junto com o editor do PC:
@@ -977,7 +1009,7 @@ def vigiar():
     return len(fila)
 
 
-@app.function(secrets=[secret])
+@app.function(secrets=segredos)
 @modal.fastapi_endpoint(method="POST")
 def enfileirar(body: dict):
     """Chamado pelo app quando o upload termina ou quando o vídeo é recusado com comentário."""
@@ -991,7 +1023,7 @@ def enfileirar(body: dict):
     return {"ok": True}
 
 
-@app.function(secrets=[secret])
+@app.function(secrets=segredos)
 @modal.fastapi_endpoint(method="POST")
 def analisar(body: dict):
     """Chamado pelo app quando uma referência termina de subir."""
@@ -1002,7 +1034,7 @@ def analisar(body: dict):
     return {"ok": True, "call_id": call.object_id}
 
 
-@app.function(secrets=[secret])
+@app.function(secrets=segredos)
 @modal.fastapi_endpoint(method="POST")
 def roteiro(body: dict):
     """Chamado pelo app quando um roteiro é salvo sem o meio escrito."""

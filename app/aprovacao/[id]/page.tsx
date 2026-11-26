@@ -22,6 +22,7 @@ import { Switch } from "@/components/ui/switch";
 import { PosicaoHeadline } from "@/components/headline-config";
 import { ImagensDoVideo } from "@/components/imagens-video";
 import { useVideoEditado, quandoEditado, type VideoReal } from "@/components/video-real";
+import { linkAssinado } from "@/lib/armazenamento";
 
 function PlayerReal({ v: v0, owner }: { v: Video; owner: string }) {
   const v = v0 as VideoReal;
@@ -29,6 +30,15 @@ function PlayerReal({ v: v0, owner }: { v: Video; owner: string }) {
   const { url, erro } = useVideoEditado(owner, v.id, v.versao, v.editadoPath, pronto);
   const [falhouTocar, setFalhouTocar] = React.useState(false);
   React.useEffect(() => setFalhouTocar(false), [url]);
+  // link que baixa o arquivo (em vez de só abrir o vídeo numa aba), com o nome do vídeo
+  const [linkBaixar, setLinkBaixar] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    setLinkBaixar(null);
+    if (!url || !v.editadoPath) return;
+    let vivo = true;
+    linkAssinado("editados", v.editadoPath, `${(v.titulo || "video").replace(/[^\p{L}\p{N}]+/gu, "_").slice(0, 60)}.mp4`).then((u) => vivo && setLinkBaixar(u));
+    return () => { vivo = false; };
+  }, [url, v.editadoPath, v.titulo]);
   const aviso = (t: React.ReactNode) => <div className="grid size-full place-items-center p-6 text-center text-sm text-white/75">{t}</div>;
   return (
     <div className="mx-auto w-full max-w-[290px] sm:max-w-[360px]">
@@ -40,7 +50,7 @@ function PlayerReal({ v: v0, owner }: { v: Video; owner: string }) {
           : erro ? aviso("O vídeo editado ainda não foi salvo. Se ele acabou de sair da fila, espere alguns segundos e recarregue.")
           : <div className="grid size-full place-items-center text-sm text-white/60"><Loader2 className="size-6 animate-spin" /></div>}
       </div>
-      {url && <Button variant="outline" size="sm" className="mt-3 w-full" asChild><a href={url} download><Download /> Baixar vídeo</a></Button>}
+      {url && <Button variant="outline" size="sm" className="mt-3 w-full" asChild><a href={linkBaixar ?? url} download><Download /> Baixar vídeo</a></Button>}
     </div>
   );
 }

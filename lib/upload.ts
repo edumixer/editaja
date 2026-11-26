@@ -1,6 +1,7 @@
 "use client";
 import * as tus from "tus-js-client";
 import { supabase, SUPABASE_URL } from "./supabase";
+import { ehR2, enviarR2 } from "./armazenamento";
 
 /**
  * Upload retomável (protocolo TUS) direto para o Supabase Storage, em partes de 6 MB.
@@ -10,6 +11,7 @@ export async function enviarRetomavel(
   arquivo: File, caminho: string,
   on: { progresso: (enviados: number, total: number) => void; ok: () => void; erro: (e: Error) => void },
 ) {
+  if (ehR2(caminho)) return enviarR2(arquivo, caminho, on);   // vídeos novos: Cloudflare R2, sem limite de 50 MB
   const { data } = await supabase!.auth.getSession();
   const token = data.session?.access_token;
   const up = new tus.Upload(arquivo, {
