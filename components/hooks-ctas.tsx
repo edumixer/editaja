@@ -8,7 +8,48 @@ import type { Trecho } from "@/lib/produtos";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
 
-export type Combinacoes = { automatico: boolean; hooks: Trecho[]; ctas: Trecho[] };
+/** modo: "todas" = cada gancho com cada CTA (9 × 9 = 81); "pares" = cada um aparece pelo menos uma vez (9 × 9 = 9).
+ * Sem escolha, o editor faz todas até MAX_TODAS vídeos e, acima disso, uma por gancho/CTA. */
+export type ModoCombinacoes = "todas" | "pares";
+export type Combinacoes = { automatico: boolean; hooks: Trecho[]; ctas: Trecho[]; modo?: ModoCombinacoes };
+
+export const MAX_TODAS = 12;   // igual ao MAX_TODAS do editor (worker/modal_app.py)
+export const modoEfetivo = (h: number, c: number, modo?: ModoCombinacoes): ModoCombinacoes => modo ?? (h * c <= MAX_TODAS ? "todas" : "pares");
+/** Quantos vídeos saem de um bruto com h ganchos e c CTAs. */
+export function quantosVideos(h: number, c: number, modo?: ModoCombinacoes) {
+  h = Math.max(1, h); c = Math.max(1, c);
+  return modoEfetivo(h, c, modo) === "todas" ? h * c : Math.max(h, c);
+}
+/** Pares (gancho, CTA) que viram vídeo, na mesma ordem do editor. */
+function paresDe(h: number, c: number, modo?: ModoCombinacoes): [number, number][] {
+  h = Math.max(1, h); c = Math.max(1, c);
+  if (modoEfetivo(h, c, modo) === "todas") return Array.from({ length: h }).flatMap((_, i) => Array.from({ length: c }).map((__, j) => [i, j] as [number, number]));
+  return Array.from({ length: Math.max(h, c) }).map((_, k) => [k % h, k % c] as [number, number]);
+}
+
+function EscolhaModo({ value, onChange, h, c }: { value: Combinacoes; onChange: (v: Combinacoes) => void; h?: number; c?: number }) {
+  const conhecido = h != null && c != null;
+  const atual = conhecido ? modoEfetivo(h!, c!, value.modo) : value.modo;
+  const ops: { v: ModoCombinacoes | undefined; titulo: string; texto: string }[] = conhecido ? [
+    { v: "todas", titulo: `Todas as combinações · ${h! * c!} ${h! * c! === 1 ? "vídeo" : "vídeos"}`, texto: "Cada gancho com cada CTA." },
+    { v: "pares", titulo: `Cada um pelo menos uma vez · ${Math.max(h!, c!)} ${Math.max(h!, c!) === 1 ? "vídeo" : "vídeos"}`, texto: "Gancho 1 + CTA 1, Gancho 2 + CTA 2… Todos os ganchos e CTAs são usados." },
+  ] : [
+    { v: undefined, titulo: "Automático", texto: `Todas as combinações até ${MAX_TODAS} vídeos; acima disso, cada gancho e cada CTA uma vez.` },
+    { v: "todas", titulo: "Sempre todas", texto: "9 ganchos × 9 CTAs = 81 vídeos." },
+    { v: "pares", titulo: "Cada um uma vez", texto: "9 ganchos × 9 CTAs = 9 vídeos." },
+  ];
+  return (
+    <div role="radiogroup" aria-label="Quantos vídeos gerar" className="grid gap-1.5">
+      {ops.map((o) => (
+        <button key={String(o.v)} type="button" role="radio" aria-checked={atual === o.v} onClick={() => onChange({ ...value, modo: o.v })}
+          className={cn("rounded-lg border p-2.5 text-left transition-colors", atual === o.v ? "border-primary bg-primary/5 ring-1 ring-primary/30" : "hover:bg-accent")}>
+          <p className="text-xs font-semibold">{o.titulo}</p>
+          <p className="text-[11px] text-muted-foreground">{o.texto}</p>
+        </button>
+      ))}
+    </div>
+  );
+}
 
 type Deteccao = { status: "pedida" | "lendo" | "pronta" | "erro"; hooks?: Trecho[]; ctas?: Trecho[]; fonte?: string; frases?: number; erro?: string };
 
@@ -55,6 +96,8 @@ export function HooksCtas({ value, onChange, videoId, varios, enviando }: {
 
   const h = Math.max(1, value.hooks.filter((x) => x.texto.trim()).length);
   const c = Math.max(1, value.ctas.filter((x) => x.texto.trim()).length);
+  const total = quantosVideos(h, c, value.modo);
+  const pares = paresDe(h, c, value.modo);
 
   const aplicar = (d: Deteccao) => {
     const hooks = (d.hooks ?? []).map((x, i) => ({ ...x, id: x.id ?? `h${i + 1}` }));
@@ -129,6 +172,15 @@ export function HooksCtas({ value, onChange, videoId, varios, enviando }: {
             {botao("Ver prévia")}
           </div>
         )
+      ) : null}
+
+      {value.automatico ? (
+        !lendo && (
+          <details className="rounded-lg border bg-card p-3 text-xs">
+            <summary className="cursor-pointer font-medium">Muitos ganchos e CTAs? Escolha quantos vídeos gerar</summary>
+            <div className="mt-2"><EscolhaModo value={value} onChange={onChange} /></div>
+          </details>
+        )
       ) : (
         <>
           <div className="grid gap-4">
@@ -145,14 +197,17 @@ export function HooksCtas({ value, onChange, videoId, varios, enviando }: {
 
       {!value.automatico && (
         <div className="rounded-lg border bg-card p-3">
-          <p className="text-sm font-semibold">{h} {h === 1 ? "gancho" : "ganchos"} × {c} {c === 1 ? "CTA" : "CTAs"} = <span className="brand-text">{h * c} {h * c === 1 ? "vídeo" : "vídeos"}</span></p>
-          {h * c > 1 && (
+          <p className="text-sm font-semibold">{h} {h === 1 ? "gancho" : "ganchos"} × {c} {c === 1 ? "CTA" : "CTAs"} = <span className="brand-text">{total} {total === 1 ? "vídeo" : "vídeos"}</span></p>
+          {h > 1 && c > 1 && <div className="mt-2"><EscolhaModo value={value} onChange={onChange} h={h} c={c} /></div>}
+          {total > 1 && (
             <div className="mt-2 flex flex-wrap gap-1.5">
-              {Array.from({ length: h }).flatMap((_, i) => Array.from({ length: c }).map((__, j) => (
-                <span key={`${i}-${j}`} className={cn("rounded-md bg-muted px-2 py-0.5 text-[11px] tabular-nums")}>Gancho {i + 1} + CTA {j + 1}</span>
-              )))}
+              {pares.slice(0, 24).map(([i, j]) => (
+                <span key={`${i}-${j}`} className={cn("rounded-md bg-muted px-2 py-0.5 text-[11px] tabular-nums")}>{h > 1 ? `Gancho ${i + 1}` : ""}{h > 1 && c > 1 ? " + " : ""}{c > 1 ? `CTA ${j + 1}` : ""}</span>
+              ))}
+              {pares.length > 24 && <span className="rounded-md px-2 py-0.5 text-[11px] text-muted-foreground">e mais {pares.length - 24}</span>}
             </div>
           )}
+          {total > MAX_TODAS && <p className="mt-2 text-[11px] text-warning">São {total} vídeos: todos são editados ao mesmo tempo, mas cada um ocupa espaço no armazenamento (uns 15 a 40 MB cada) e passa pela Aprovação.</p>}
           <p className="mt-2 text-[11px] text-muted-foreground">Os textos e tempos vêm da sua fala. Corrigir o texto não muda o áudio: o editor usa o trecho que você falou.</p>
         </div>
       )}

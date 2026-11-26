@@ -23,7 +23,7 @@ import { supabase } from "@/lib/supabase";
 import { capturarCapa } from "@/components/capa-video";
 import { useEstilos } from "@/lib/estilos-store";
 import { useProdutos } from "@/lib/produtos-store";
-import { HooksCtas, type Combinacoes } from "@/components/hooks-ctas";
+import { HooksCtas, quantosVideos, type Combinacoes } from "@/components/hooks-ctas";
 import { HeadlineConfig, HEADLINE_PADRAO, type HeadlineCfg } from "@/components/headline-config";
 import Link from "next/link";
 import type { Upload as TusUpload } from "tus-js-client";
@@ -150,7 +150,7 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
   const ativos = envios.filter((e) => !e.naFila);
   const unico = ativos.length === 1 ? ativos[0] : null;
   const varios = ativos.length > 1;
-  const combFinal: Combinacoes = varios ? { automatico: true, hooks: [], ctas: [] } : comb;
+  const combFinal: Combinacoes = varios ? { automatico: true, hooks: [], ctas: [], modo: comb.modo } : comb;
 
   const mandarParaFila = async () => {
     if (modoReal) {
@@ -168,7 +168,7 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
       if (headline.modo === "sem") update(id, { headlineAtiva: false });
       else if (headline.modo === "manual" && headline.texto.trim()) update(id, { headline: headline.texto.trim(), headlinePos: { x: headline.x, y: headline.y } });
     });
-    const n = combFinal.automatico ? 0 : Math.max(1, combFinal.hooks.filter((x) => x.texto.trim()).length) * Math.max(1, combFinal.ctas.filter((x) => x.texto.trim()).length);
+    const n = combFinal.automatico ? 0 : quantosVideos(combFinal.hooks.filter((x) => x.texto.trim()).length, combFinal.ctas.filter((x) => x.texto.trim()).length, combFinal.modo);
     toast.success(`${paraEditar.length} vídeo(s) na fila de edição${prod ? ` · ${prod.nome}` : ""}`, { description: subindo.length ? "Os que ainda estão subindo entram na fila assim que terminarem. Acompanhe a barra de envio na Fila; não feche o site até lá." : n > 1 ? `Cada bruto vira ${n} vídeos (ganchos × CTAs). Você recebe um aviso quando estiverem prontos.` : "Você recebe um aviso quando estiverem prontos para aprovar." });
     setEnvios((es) => es.filter((e) => !e.feito));
     onOpenChange(false);

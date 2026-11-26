@@ -242,42 +242,98 @@ def _palavras_produto(produto):
     return out
 
 
-def _gatilhos_falados(palavras, frases, produto):
-    """Lista (t_bruto, rotulo, palavra) de cada gatilho falado, usando o tempo da PALAVRA (não da frase)."""
+# Categorias criadas pela pessoa (tabela categorias_imagem): lugar e tamanho escolhidos na tela de Produtos.
+LUGAR_CATEGORIA = {
+    "direita":  [{"x": 0.53, "y": 0.12, "angulo": 6}, {"x": 0.05, "y": 0.12, "angulo": -6}],
+    "esquerda": [{"x": 0.05, "y": 0.12, "angulo": -6}, {"x": 0.53, "y": 0.12, "angulo": 6}],
+    "centro":   [{"x": None, "y": 0.26, "angulo": -4}],   # x = centralizado pela largura
+}
+LARGURA_CATEGORIA = {"pequena": 0.32, "media": 0.42, "grande": 0.60}
+
+
+def _carregar_categorias(db, owner_id):
+    """Categorias de imagem personalizadas da conta. Cada uma: {id, nome, gatilhos[], lugar, tamanho, duracao, reserva}."""
+    try:
+        rows = db.table("categorias_imagem").select("*").eq("owner_id", owner_id).execute().data or []
+    except Exception as e:   # tabela ainda não criada (migration 013): segue só com as etiquetas fixas
+        print("categorias personalizadas indisponíveis:", e)
+        return []
+    out = []
+    for r in rows:
+        gat = [" ".join(_sem_acento(g).split()) for g in (r.get("gatilhos") or [])]
+        gat = [g for g in gat if g]
+        if gat:
+            out.append(dict(r, gatilhos=gat))
+    return out
+
+
+def _gatilhos_falados(palavras, frases, produto, categorias=()):
+    """Lista (t_bruto, rotulo, gatilho) de cada gatilho falado, usando o tempo da PALAVRA (não da frase).
+    Frases das categorias personalizadas têm prioridade e, entre todas, a frase mais longa ganha
+    (ex.: "compre aqui na loja oficial" chama a categoria "Oficial", e o "loja" de dentro dela não chama o Print)."""
     tokens = [(w["s"], _sem_acento(w.get("w", "")).strip()) for w in (palavras or []) if _sem_acento(w.get("w", "")).strip()]
     if not tokens:   # transcrição sem palavras: usa o começo de cada frase
         tokens = [(f["s"], _sem_acento(f["texto"]).strip()) for f in frases]
-    gat = {r: tuple(ws) for r, ws in GATILHOS.items()}
-    gat["produto"] = tuple(gat["produto"]) + tuple(_palavras_produto(produto))
-    achados = []
-    for i, (t, w) in enumerate(tokens):
-        janela = " ".join(x[1] for x in tokens[i:i + 3])
-        for rot, ws in gat.items():
-            for g in ws:
-                if (" " in g and janela.startswith(g)) or (" " not in g and (w == g or w.split()[:1] == [g])):
-                    achados.append((t, rot, g))
-                    break
-            else:
-                continue
-            break
+    # cada token pode ter mais de uma palavra (ex.: "olha so"): trabalha palavra a palavra
+    seq = []
+    for t, w in tokens:
+        for parte in w.split():
+            seq.append((t, parte))
+    cands = []   # (prioridade, n_palavras, rotulo, gatilho, lista de palavras)
+    for c in categorias or []:
+        for g in c["gatilhos"]:
+            cands.append((0, len(g.split()), c["id"], g, g.split()))
+    fixos = {r: tuple(ws) for r, ws in GATILHOS.items()}
+    fixos["produto"] = tuple(fixos["produto"]) + tuple(_palavras_produto(produto))
+    for rot, ws in fixos.items():
+        for g in ws:
+            cands.append((1, len(g.split()), rot, g, g.split()))
+    cands.sort(key=lambda x: (x[0], -x[1]))
+    achados, i = [], 0
+    while i < len(seq):
+        for _, n, rot, g, partes in cands:
+            if [w for _, w in seq[i:i + n]] == partes:
+                achados.append((seq[i][0], rot, g))
+                i += n
+                break
+        else:
+            i += 1
     return achados
 
 
-def _sugerir_imagens(trechos, palavras, frases, imagens, produto, vel):
-    """Sugere 1 imagem por gatilho falado (tempo no vídeo FINAL), no lugar padrão da etiqueta.
+def _sugerir_imagens(trechos, palavras, frases, imagens, produto, vel, categorias=()):
+    """Sugere 1 imagem por gatilho falado (tempo no vídeo FINAL), no lugar padrão da etiqueta/categoria.
     Cada item: {id, rotulo, imagem_id, path, arquivo, de, ate, x, y, largura, angulo, motivo}."""
     if not imagens:
         return []
+    cat = {c["id"]: c for c in categorias or []}
+
     def lista(rot):
         if imagens.get(rot):
             return imagens[rot]
+        if rot in cat:   # categoria sem imagem neste produto: usa a etiqueta reserva escolhida (ex.: Produto)
+            return lista(cat[rot]["reserva"]) if cat[rot].get("reserva") else []
         if rot == "produto":
             return imagens.get("original") or []
         if rot == "original":
             return imagens.get("produto") or []
         return []
+
+    def lugares(rot):
+        if rot in cat:
+            larg = LARGURA_CATEGORIA.get(cat[rot].get("tamanho"), 0.42)
+            ops = LUGAR_CATEGORIA.get(cat[rot].get("lugar"), LUGAR_CATEGORIA["direita"])
+            return [dict(l, x=round((1 - larg) / 2, 3) if l["x"] is None else l["x"]) for l in ops], larg
+        return LUGAR.get(rot, LUGAR["produto"]), LARGURA.get(rot, 0.42)
+
+    def duracao(rot):
+        try:
+            return max(0.5, min(8.0, float(cat[rot].get("duracao") or DURACAO_IMAGEM))) if rot in cat else DURACAO_IMAGEM
+        except (TypeError, ValueError):
+            return DURACAO_IMAGEM
+
     itens, usados, ultimo = [], {}, {}
-    for t, rot, g in _gatilhos_falados(palavras, frases, produto):
+    for t, rot, g in _gatilhos_falados(palavras, frases, produto, categorias):
         imgs = lista(rot)
         if not imgs:
             continue
@@ -291,7 +347,7 @@ def _sugerir_imagens(trechos, palavras, frases, imagens, produto, vel):
             continue
         k = usados.get(rot, 0); usados[rot] = k + 1; ultimo[rot] = de
         img = imgs[k % len(imgs)]
-        opcoes_lugar = LUGAR.get(rot, LUGAR["produto"])
+        opcoes_lugar, largura = lugares(rot)
         opcoes_lugar = opcoes_lugar[k % len(opcoes_lugar):] + opcoes_lugar[:k % len(opcoes_lugar)]
         ativas = [i for i in itens if i["ate"] > de]
         def ocupado(l):
@@ -300,17 +356,18 @@ def _sugerir_imagens(trechos, palavras, frases, imagens, produto, vel):
         for i in ocupado(lug):   # sem lugar livre: a imagem anterior sai quando a nova entra
             i["ate"] = round(de, 2)
         mm, ss = divmod(int(de), 60)
+        nome = f" ({cat[rot]['nome']})" if rot in cat else ""
         itens.append({"id": f"i{len(itens) + 1}", "rotulo": rot, "imagem_id": img["id"], "path": img["path"], "arquivo": img["arquivo"],
-                      "de": round(de, 2), "ate": round(de + DURACAO_IMAGEM, 2), "x": lug["x"], "y": lug["y"],
-                      "largura": LARGURA.get(rot, 0.42), "angulo": lug["angulo"],
-                      "motivo": f"Você falou “{g}” em {mm}:{ss:02d}"})
+                      "de": round(de, 2), "ate": round(de + duracao(rot), 2), "x": lug["x"], "y": lug["y"],
+                      "largura": largura, "angulo": lug["angulo"],
+                      "motivo": f"Você falou “{g}” em {mm}:{ss:02d}{nome}"})
     # imagens lado a lado (ex.: "falso, falso") ficam juntas até a última sair
     for a in itens:
         for b in itens:
             if a is not b and a["rotulo"] == b["rotulo"] == "falso" and 0 < b["de"] - a["de"] < 1.2:
                 a["ate"] = max(a["ate"], b["ate"])
     # uma imagem de "Produto" que não foi chamada por nenhuma fala: sugere logo depois do gancho (a pessoa pode tirar)
-    if lista("produto") and not any(i["rotulo"] in ("produto", "original") for i in itens):
+    if lista("produto") and not any(i["rotulo"] in ("produto", "original") or i["rotulo"] in cat for i in itens):
         t0 = next((f["s"] for f in frases[1:] if _tempo_final(trechos, f["s"] + 0.05, vel) is not None), None)
         de = _tempo_final(trechos, t0 + 0.05, vel) if t0 is not None else None
         if de is not None:
@@ -346,6 +403,7 @@ def _sobreposicoes(itens):
 PALAVRAS_CTA = ("link", "carrinho", "clica", "clique", "compra", "comenta", "garante", "corre", "segue", "bio",
                 "aproveita", "promoção", "promocao", "desconto", "cupom", "frete", "pega o seu", "pega a sua")
 PAUSA_ENTRE_TAKES = 1.3   # pausa (s) que separa duas tentativas/alternativas gravadas no mesmo bruto
+MAX_ALTERNATIVAS = int(os.environ.get("MAX_ALTERNATIVAS", "20"))   # teto de segurança de ganchos (e de CTAs) achados sozinhos
 
 
 def _casar_texto(frases, texto):
@@ -395,7 +453,7 @@ def _heuristica_hooks_ctas(frases, duracao):
         if b["s"] > duracao * 0.35 or b["e"] - b["s"] > 8.0:
             break
         hooks.append(b)
-    hooks = _sem_retakes(hooks)[:4]
+    hooks = _sem_retakes(hooks)[:MAX_ALTERNATIVAS]
     if len(hooks) >= len(bl) - 1:          # sem corpo depois: não dá para afirmar que são ganchos alternativos
         hooks = hooks[:1]
     if len(hooks) <= 1:                    # um gancho só: mostra a primeira frase falada (se curta), sem variações
@@ -405,7 +463,7 @@ def _heuristica_hooks_ctas(frases, duracao):
         if b["s"] < duracao * 0.6 or b in hooks or not any(w in b["texto"].lower() for w in PALAVRAS_CTA):
             break
         ctas.insert(0, b)
-    ctas = _sem_retakes(ctas)[:4]
+    ctas = _sem_retakes(ctas)[:MAX_ALTERNATIVAS]
     return hooks, ctas
 
 
@@ -420,7 +478,7 @@ def _detectar_hooks_ctas(frases, duracao):
             import anthropic
             linhas = "\n".join(f"{i}: [{f['s']:.1f}-{f['e']:.1f}] {f['texto']}" for i, f in enumerate(frases))
             msg = anthropic.Anthropic().messages.create(
-                model="claude-sonnet-5-5", max_tokens=1500,
+                model="claude-sonnet-5-5", max_tokens=3000,
                 messages=[{"role": "user", "content":
                     "Transcrição de um vídeo BRUTO de TikTok (sem edição), uma frase por linha (índice: [início-fim] texto).\n"
                     "Às vezes a pessoa grava VÁRIOS GANCHOS ALTERNATIVOS no começo (frases diferentes para abrir o vídeo, "
@@ -433,8 +491,8 @@ def _detectar_hooks_ctas(frases, duracao):
             d = json.loads(txt[txt.index("{"): txt.rindex("}") + 1])
             ok = lambda x: isinstance(x, list) and len(x) == 2 and 0 <= int(x[0]) <= int(x[1]) < len(frases)
             faixa = lambda a, b: {"texto": " ".join(f["texto"] for f in frases[a:b + 1]), "s": frases[a]["s"], "e": frases[b]["e"]}
-            return ([faixa(int(x[0]), int(x[1])) for x in d.get("hooks", []) if ok(x)][:6],
-                    [faixa(int(x[0]), int(x[1])) for x in d.get("ctas", []) if ok(x)][:6], "ia")
+            return ([faixa(int(x[0]), int(x[1])) for x in d.get("hooks", []) if ok(x)][:MAX_ALTERNATIVAS],
+                    [faixa(int(x[0]), int(x[1])) for x in d.get("ctas", []) if ok(x)][:MAX_ALTERNATIVAS], "ia")
         except Exception as e:  # cai na heurística
             print("detecção por IA falhou:", e)
     h, c = _heuristica_hooks_ctas(frases, duracao)
@@ -500,13 +558,60 @@ def _combinacoes(plano, frases, comb, duracao, deteccao=None):
         return [(None, None, None, plano["trechos"])], hooks, ctas
     faixas = [(x["s"] - FOLGA_INI, x["e"] + FOLGA_FIM) for x in hooks + ctas]
     corpo = _subtrair(plano["trechos"], faixas)
+    hs, cs = list(enumerate(hooks)) or [(None, None)], list(enumerate(ctas)) or [(None, None)]
+    if _modo_combinacoes(comb, len(hs), len(cs)) == "pares":
+        # cada gancho e cada CTA aparecem pelo menos uma vez: 9 ganchos x 9 CTAs = 9 vídeos (G1+C1, G2+C2...)
+        n = max(len(hs), len(cs))
+        pares = [(hs[k % len(hs)], cs[k % len(cs)]) for k in range(n)]
+    else:   # todas as combinações: 9 x 9 = 81 vídeos
+        pares = [(a, b) for a in hs for b in cs]
     saida = []
-    for i, h in enumerate(hooks or [None]):
-        for j, c in enumerate(ctas or [None]):
-            tr = (_faixa(plano["trechos"], h, duracao) if h else []) + corpo + (_faixa(plano["trechos"], c, duracao) if c else [])
-            rot = " + ".join(x for x in (f"Gancho {i + 1}" if h and len(hooks) > 1 else "", f"CTA {j + 1}" if c and len(ctas) > 1 else "") if x)
-            saida.append((rot, i if h else None, j if c else None, tr))
+    for (i, h), (j, c) in pares:
+        tr = (_faixa(plano["trechos"], h, duracao) if h else []) + corpo + (_faixa(plano["trechos"], c, duracao) if c else [])
+        rot = " + ".join(x for x in (f"Gancho {i + 1}" if h and len(hooks) > 1 else "", f"CTA {j + 1}" if c and len(ctas) > 1 else "") if x)
+        saida.append((rot, i, j, tr))
     return saida, hooks, ctas
+
+
+MAX_TODAS = int(os.environ.get("MAX_TODAS", "12"))   # até aqui, "automático" gera todas as combinações; acima, uma por gancho/CTA
+
+
+def _modo_combinacoes(comb, n_hooks, n_ctas):
+    """"todas" = cada gancho com cada CTA; "pares" = cada um aparece pelo menos uma vez.
+    A pessoa escolhe no envio; sem escolha, todas até MAX_TODAS vídeos e pares acima disso."""
+    modo = (comb or {}).get("modo")
+    if modo in ("todas", "pares"):
+        return modo
+    return "todas" if n_hooks * n_ctas <= MAX_TODAS else "pares"
+
+
+def _versoes_em_paralelo(db, v, combos, hooks, ctas, produto_id):
+    """Cria um vídeo filho para cada combinação extra (Gancho i + CTA j) e manda editar cada um na sua máquina.
+    Os filhos recebem os ganchos/CTAs JÁ marcados (com tempos), para escolherem exatamente a mesma combinação.
+    Devolve só a 1ª combinação (fica neste vídeo) ou None se não deu para criar os filhos (aí edita em sequência)."""
+    modo = _modo_combinacoes(v.get("combinacoes") or (v.get("opcoes") or {}).get("combinacoes"),
+                             max(1, len(hooks)), max(1, len(ctas)))
+    fixas = {"automatico": False, "modo": modo,
+             "hooks": [{"id": f"h{i + 1}", "texto": x["texto"], "s": x["s"], "e": x["e"]} for i, x in enumerate(hooks)],
+             "ctas": [{"id": f"c{i + 1}", "texto": x["texto"], "s": x["s"], "e": x["e"]} for i, x in enumerate(ctas)]}
+    criados = []
+    try:
+        _status(db, v["id"], combinacoes=fixas)
+        for rotulo, hi, ci, _tr in combos[1:]:
+            novo = {kk: v.get(kk) for kk in ("owner_id", "titulo", "produto", "headline", "opcoes", "bruto_path", "estilo_id")}
+            novo.update(titulo=f"{v['titulo']} · {rotulo}", origem_id=v["id"], produto_id=produto_id, combinacoes=fixas,
+                        hook_idx=hi, cta_idx=ci, variante=rotulo, status="editando", etapa=0, progresso=0, versao=1)
+            criados.append(db.table("videos").insert(novo).execute().data[0]["id"])
+        for cid in criados:
+            try:
+                editar.spawn(cid)
+            except Exception as e:   # o vigia pega da fila no próximo minuto
+                print("versão não iniciada agora:", cid, e)
+                _status(db, cid, status="fila")
+        return combos[:1]
+    except Exception as e:
+        print("versões em paralelo falharam:", e)
+        return combos[:1] if criados else None   # alguma já foi criada: não duplica editando em sequência
 
 
 def _transcrever(db, v, bruto, editor):
@@ -588,6 +693,7 @@ def editar(video_id: str):
                 f.write(db.storage.from_("brutos").download(v["bruto_path"]))
             pasta_imgs = os.path.join(tmp, "imagens")
             imagens = _baixar_imagens_produto(db, produto_id, pasta_imgs)   # só as imagens DESTE produto
+            categorias = _carregar_categorias(db, v["owner_id"])            # categorias criadas pela pessoa (ex.: "Oficial")
             dur_bruto = editor.duration(bruto)
 
             and_.fase("transcricao", esperado_s=max(10, dur_bruto * 0.6))
@@ -639,6 +745,9 @@ def editar(video_id: str):
                 combos = combos[:1]   # as outras versões já existem: refaz só a deste vídeo
             if len(combos) > 1:
                 _status(db, video_id, variante=f"{len(combos)} combinações")
+                # cada versão extra vira um vídeo próprio e é editada AO MESMO TEMPO, cada uma na sua máquina
+                # (antes era uma depois da outra e 9 x 9 = 81 versões passavam do tempo máximo de 45 min)
+                combos = _versoes_em_paralelo(db, v, combos, ganchos, _ctas, produto_id) or combos
 
             and_.fase("montagem", esperado_s=5)
             run_original, versao_pc_original = editor.run, editor.versao_pc
@@ -656,7 +765,7 @@ def editar(video_id: str):
                 if linha.get("imagens_ajustadas") and linha.get("imagens") is not None:
                     itens = _ajustadas(linha["imagens"], imagens)
                 else:
-                    itens = _sugerir_imagens(trechos, palavras, frases, imagens, produto, vel)
+                    itens = _sugerir_imagens(trechos, palavras, frases, imagens, produto, vel, categorias)
                 p["sobreposicoes"] = _sobreposicoes(itens)
                 json.dump(p, open(plano_path, "w"), ensure_ascii=False, indent=1)
                 saida = saida_padrao.replace(".mp4", f"_{k + 1}.mp4")

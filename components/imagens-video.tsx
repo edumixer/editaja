@@ -9,6 +9,8 @@ import { supabase } from "@/lib/supabase";
 import { linkAssinado } from "@/components/capa-video";
 import { cn } from "@/lib/utils";
 import type { Video } from "@/lib/data";
+import { useProdutos } from "@/lib/produtos-store";
+import type { Categoria } from "@/lib/produtos";
 
 /** Uma imagem do produto no vídeo final. Tempos no vídeo editado; x/y = canto de cima à esquerda (fração da tela). */
 export type ImagemNoVideo = {
@@ -28,6 +30,12 @@ const LUGAR: Record<string, { x: number; y: number; angulo: number; largura: num
   produto: { x: 0.53, y: 0.12, angulo: 6, largura: 0.42 }, detalhe: { x: 0.53, y: 0.34, angulo: 5, largura: 0.40 },
   print: { x: 0.12, y: 0.10, angulo: -3, largura: 0.76 },
 };
+/** Lugar padrão de uma categoria criada pela pessoa (o mesmo cálculo do editor). */
+function lugarCategoria(c: Categoria) {
+  const largura = { pequena: 0.32, media: 0.42, grande: 0.6 }[c.tamanho] ?? 0.42;
+  if (c.lugar === "centro") return { x: +((1 - largura) / 2).toFixed(3), y: 0.26, angulo: -4, largura };
+  return c.lugar === "esquerda" ? { x: 0.05, y: 0.12, angulo: -6, largura } : { x: 0.53, y: 0.12, angulo: 6, largura };
+}
 const fmt = (s: number) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0").replace(".", ",")}`;
 const lim = (n: number, a: number, b: number) => Math.min(b, Math.max(a, n));
 
@@ -65,6 +73,10 @@ export function ImagensDoVideo({ v, onRefazer }: { v: Video; onRefazer: (texto: 
   const urlVideo = useLink("editados", x.editadoPath);
   const urlCapa = useLink("brutos", x.capaPath);
   const dur = Math.max(1, (v.duracaoFinal ?? 30) - CAPA);
+  const { categorias } = useProdutos();
+  const cat = (r: string) => categorias.find((c) => c.id === r);
+  const nome = (r: string) => NOME[r] ?? cat(r)?.nome ?? "Categoria";
+  const cor = (r: string) => (COR[r] ? { className: COR[r] } : { className: "text-white", style: { backgroundColor: `oklch(0.55 0.17 ${cat(r)?.hue ?? 285})` } as React.CSSProperties });
 
   React.useEffect(() => {
     let vivo = true;
@@ -103,10 +115,11 @@ export function ImagensDoVideo({ v, onRefazer }: { v: Video; onRefazer: (texto: 
   };
 
   const adicionar = (img: ImagemProduto) => {
-    const base = LUGAR[img.rotulo] ?? LUGAR.produto;
+    const c = cat(img.rotulo);
+    const base = LUGAR[img.rotulo] ?? (c ? lugarCategoria(c) : LUGAR.produto);
     const de = atual ? Math.min(dur - 1, atual.ate) : Math.min(1, dur / 4);
     const novo: ImagemNoVideo = { id: `n${Date.now().toString(36)}`, rotulo: img.rotulo, imagem_id: img.id, path: img.storage_path,
-      de: +de.toFixed(2), ate: +Math.min(dur, de + 2).toFixed(2), ...base, motivo: "Você adicionou" };
+      de: +de.toFixed(2), ate: +Math.min(dur, de + (c?.duracao ?? 2)).toFixed(2), ...base, motivo: "Você adicionou" };
     setItens((xs) => [...xs, novo].sort((a, b) => a.de - b.de)); setSel(novo.id);
   };
 
@@ -159,7 +172,7 @@ export function ImagensDoVideo({ v, onRefazer }: { v: Video; onRefazer: (texto: 
               onLoadedMetadata={(e) => { if (atual) e.currentTarget.currentTime = Math.max(0, atual.de + CAPA - 0.06); }} />
               : urlCapa ? <img src={urlCapa} alt="" className="absolute inset-0 size-full object-cover opacity-90" /> : null}
             {(atual ? tempo : []).map((i) => (
-              <div key={i.id} role="button" aria-label={`Imagem ${NOME[i.rotulo] ?? i.rotulo}`}
+              <div key={i.id} role="button" aria-label={`Imagem ${nome(i.rotulo)}`}
                 className={cn("absolute cursor-grab active:cursor-grabbing", i.id === sel ? "z-10 outline-2 outline-offset-2 outline-primary [outline-style:solid]" : "opacity-70")}
                 style={{ left: `${i.x * 100}%`, top: `${i.y * 100}%`, width: `${i.largura * 100}%`, transform: `rotate(${i.angulo}deg)`, transformOrigin: "center" }}
                 onPointerDown={(e) => {
@@ -178,9 +191,9 @@ export function ImagensDoVideo({ v, onRefazer }: { v: Video; onRefazer: (texto: 
             <div>
               <div className="relative h-9 rounded-lg bg-muted">
                 {itens.map((i) => (
-                  <button key={i.id} onClick={() => setSel(i.id)} title={`${NOME[i.rotulo] ?? i.rotulo} · ${fmt(i.de + CAPA)}`}
-                    className={cn("absolute top-1 h-7 min-w-2 rounded-md text-[10px] font-semibold", COR[i.rotulo] ?? "bg-primary text-primary-foreground", i.id === sel ? "ring-2 ring-foreground" : "opacity-80")}
-                    style={{ left: `${(i.de / dur) * 100}%`, width: `${Math.max(2, ((i.ate - i.de) / dur) * 100)}%` }} />
+                  <button key={i.id} onClick={() => setSel(i.id)} title={`${nome(i.rotulo)} · ${fmt(i.de + CAPA)}`}
+                    className={cn("absolute top-1 h-7 min-w-2 rounded-md text-[10px] font-semibold", cor(i.rotulo).className, i.id === sel ? "ring-2 ring-foreground" : "opacity-80")}
+                    style={{ ...cor(i.rotulo).style, left: `${(i.de / dur) * 100}%`, width: `${Math.max(2, ((i.ate - i.de) / dur) * 100)}%` }} />
                 ))}
               </div>
               <div className="mt-1 flex justify-between text-[10px] tabular-nums text-muted-foreground"><span>0:00</span><span>{fmt(dur + CAPA)}</span></div>
@@ -188,7 +201,7 @@ export function ImagensDoVideo({ v, onRefazer }: { v: Video; onRefazer: (texto: 
                 {itens.map((i, n) => (
                   <button key={i.id} onClick={() => setSel(i.id)}
                     className={cn("flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] tabular-nums", i.id === sel ? "border-primary bg-primary/10 font-semibold" : "hover:bg-muted")}>
-                    <span className={cn("size-2 rounded-full", COR[i.rotulo])} />{n + 1}. {NOME[i.rotulo] ?? i.rotulo} · {fmt(i.de + CAPA)}
+                    <span className={cn("size-2 rounded-full", cor(i.rotulo).className)} style={cor(i.rotulo).style} />{n + 1}. {nome(i.rotulo)} · {fmt(i.de + CAPA)}
                   </button>
                 ))}
               </div>
@@ -199,7 +212,7 @@ export function ImagensDoVideo({ v, onRefazer }: { v: Video; onRefazer: (texto: 
                 <div className="flex items-center gap-2">
                   <Miniatura path={atual.path} className="size-9 shrink-0 rounded object-cover" />
                   <div className="min-w-0 flex-1">
-                    <Badge className={cn("border-0", COR[atual.rotulo])}>{NOME[atual.rotulo] ?? atual.rotulo}</Badge>
+                    <Badge className={cn("border-0", cor(atual.rotulo).className)} style={cor(atual.rotulo).style}>{nome(atual.rotulo)}</Badge>
                     {atual.motivo && <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{atual.motivo}</p>}
                   </div>
                   <Button variant="ghost" size="icon-sm" aria-label="Tirar esta imagem" onClick={() => { setItens((xs) => xs.filter((i) => i.id !== atual.id)); setSel(itens.find((i) => i.id !== atual.id)?.id ?? null); }}><Trash2 /></Button>
@@ -227,9 +240,9 @@ export function ImagensDoVideo({ v, onRefazer }: { v: Video; onRefazer: (texto: 
               <p className="mb-1.5 text-xs font-medium">Adicionar imagem do produto</p>
               <div className="flex flex-wrap gap-2">
                 {doProduto.map((img) => (
-                  <button key={img.id} onClick={() => adicionar(img)} className="group relative size-14 overflow-hidden rounded-lg border hover:ring-2 hover:ring-primary" title={`Adicionar (${NOME[img.rotulo] ?? img.rotulo})`}>
+                  <button key={img.id} onClick={() => adicionar(img)} className="group relative size-14 overflow-hidden rounded-lg border hover:ring-2 hover:ring-primary" title={`Adicionar (${nome(img.rotulo)})`}>
                     <Miniatura path={img.storage_path} className="size-full object-cover" />
-                    <span className={cn("absolute inset-x-0 bottom-0 truncate px-0.5 text-[9px] font-semibold", COR[img.rotulo])}>{NOME[img.rotulo] ?? img.rotulo}</span>
+                    <span className={cn("absolute inset-x-0 bottom-0 truncate px-0.5 text-[9px] font-semibold", cor(img.rotulo).className)} style={cor(img.rotulo).style}>{nome(img.rotulo)}</span>
                     <Plus className="absolute right-0.5 top-0.5 size-3.5 rounded-full bg-background/90 p-0.5 opacity-0 group-hover:opacity-100" />
                   </button>
                 ))}

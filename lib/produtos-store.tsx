@@ -1,7 +1,7 @@
 "use client";
 import * as React from "react";
 import { toast } from "sonner";
-import { PRODUTOS_INICIAIS, IDS_EXEMPLO, type Produto, type ImagemProduto, type Rotulo } from "./produtos";
+import { PRODUTOS_INICIAIS, IDS_EXEMPLO, type Produto, type ImagemProduto, type Rotulo, type Categoria } from "./produtos";
 import { modoReal, supabase } from "./supabase";
 
 /**
@@ -19,11 +19,17 @@ type Ctx = {
   adicionarImagens: (produtoId: string, arquivos: File[], rotulo: Rotulo) => void;
   rotularImagem: (produtoId: string, imagemId: string, rotulo: Rotulo) => void;
   removerImagem: (produtoId: string, imagemId: string) => void;
+  /** Categorias de imagem criadas pela pessoa (valem para todos os produtos). */
+  categorias: Categoria[];
+  salvarCategoria: (c: Omit<Categoria, "id" | "hue"> & { id?: string }) => string;
+  removerCategoria: (id: string) => void;
 };
 
 const ProdutosCtx = React.createContext<Ctx | null>(null);
 const KEY = "editaja:produtos:v1";
 const KEY_IMPORTADO = "editaja:produtos:importado";
+const KEY_CATEGORIAS = "editaja:categorias:v1";
+const HUES_CATEGORIA = [285, 200, 160, 25, 330, 95, 245, 55];
 const slug = (s: string) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 const hueDe = (id: string) => { let h = 0; for (const c of id) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
 const tamanho = (bytes: number) => (bytes > 1e6 ? `${(bytes / 1e6).toFixed(1).replace(".", ",")} MB` : `${Math.max(1, Math.round(bytes / 1e3))} KB`);
@@ -39,10 +45,15 @@ const lerImagem = (f: File) => new Promise<string | undefined>((ok) => {
 });
 
 type LinhaProduto = { id: string; nome: string; descricao: string | null; palavras: string[] | null; created_at: string };
+type LinhaCategoria = { id: string; nome: string; gatilhos: string[] | null; lugar: Categoria["lugar"]; tamanho: Categoria["tamanho"]; duracao: number | string; reserva: Categoria["reserva"]; hue: number };
+const daLinha = (c: LinhaCategoria): Categoria => ({ id: c.id, nome: c.nome, gatilhos: c.gatilhos ?? [], lugar: c.lugar ?? "direita",
+  tamanho: c.tamanho ?? "media", duracao: Number(c.duracao) || 2, reserva: c.reserva ?? null, hue: c.hue ?? 285 });
+
 type LinhaImagem = { id: string; produto_id: string; nome: string; rotulo: Rotulo; storage_path: string; tamanho_kb: number | null; ordem: number; origem: string | null };
 
 export function ProdutosProvider({ children }: { children: React.ReactNode }) {
   const [produtos, setProdutos] = React.useState<Produto[]>(PRODUTOS_INICIAIS);
+  const [categorias, setCategorias] = React.useState<Categoria[]>([]);
   const [carregando, setCarregando] = React.useState(modoReal);
   const [uid, setUid] = React.useState<string | null>(null);
   const uidRef = React.useRef<string | null | undefined>(undefined);
@@ -51,10 +62,12 @@ export function ProdutosProvider({ children }: { children: React.ReactNode }) {
   /* ---------- modo real: carrega da conta ---------- */
   const recarregar = React.useCallback(async () => {
     if (!supabase) return;
-    const [{ data: ps }, { data: ims }] = await Promise.all([
+    const [{ data: ps }, { data: ims }, cats] = await Promise.all([
       supabase.from("produtos").select("id, nome, descricao, palavras, created_at").order("created_at", { ascending: false }),
       supabase.from("produto_imagens").select("id, produto_id, nome, rotulo, storage_path, tamanho_kb, ordem, origem").order("ordem"),
+      supabase.from("categorias_imagem").select("id, nome, gatilhos, lugar, tamanho, duracao, reserva, hue").order("created_at"),
     ]);
+    if (!cats.error) setCategorias(((cats.data as LinhaCategoria[] | null) ?? []).map(daLinha));
     const imagens = (ims as LinhaImagem[] | null) ?? [];
     // miniaturas: links assinados (1 h) das imagens guardadas no Storage
     const urls: Record<string, string> = {};
@@ -118,7 +131,7 @@ export function ProdutosProvider({ children }: { children: React.ReactNode }) {
     const iniciar = async (id: string | null) => {
       if (uidRef.current === id) return;
       uidRef.current = id; setUid(id);
-      if (!id) { setProdutos([]); setCarregando(false); return; }
+      if (!id) { setProdutos([]); setCategorias([]); setCarregando(false); return; }
       setCarregando(true);
       await importarDoNavegador(id);
       await recarregar();
@@ -132,18 +145,50 @@ export function ProdutosProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     if (modoReal) return;
     try { const raw = localStorage.getItem(KEY); if (raw) setProdutos((JSON.parse(raw) as Produto[]).filter((p) => !exemplo(p.nome))); } catch {}
+    try { const raw = localStorage.getItem(KEY_CATEGORIAS); if (raw) setCategorias(JSON.parse(raw) as Categoria[]); } catch {}
     loaded.current = true;
   }, []);
   React.useEffect(() => {
     if (modoReal || !loaded.current) return;
     try { localStorage.setItem(KEY, JSON.stringify(produtos)); } catch {}
   }, [produtos]);
+  React.useEffect(() => {
+    if (modoReal || !loaded.current) return;
+    try { localStorage.setItem(KEY_CATEGORIAS, JSON.stringify(categorias)); } catch {}
+  }, [categorias]);
 
   const mudar = (id: string, fn: (p: Produto) => Produto) => setProdutos((ps) => ps.map((p) => (p.id === id ? fn(p) : p)));
   const falhou = (o: string) => (e: unknown) => { toast.error(`Não deu para ${o}`, { description: (e as Error)?.message ?? "Tente de novo." }); recarregar(); };
 
   const value: Ctx = {
-    produtos, carregando,
+    produtos, carregando, categorias,
+    salvarCategoria: (c) => {
+      const limpa = { nome: c.nome.trim(), gatilhos: [...new Set(c.gatilhos.map((g) => g.trim()).filter(Boolean))], lugar: c.lugar,
+        tamanho: c.tamanho, duracao: c.duracao, reserva: c.reserva };
+      if (c.id) {
+        const id = c.id;
+        setCategorias((cs) => cs.map((x) => (x.id === id ? { ...x, ...limpa } : x)));
+        if (supabase) supabase.from("categorias_imagem").update(limpa).eq("id", id)
+          .then(({ error }) => { if (error) falhou("salvar a categoria")(error); });
+        return id;
+      }
+      const id = uuid();
+      const hue = HUES_CATEGORIA[categorias.length % HUES_CATEGORIA.length];
+      setCategorias((cs) => [...cs, { id, hue, ...limpa }]);
+      if (supabase && uid) supabase.from("categorias_imagem").insert({ id, owner_id: uid, hue, ...limpa })
+        .then(({ error }) => { if (error) falhou("criar a categoria")(error); });
+      return id;
+    },
+    removerCategoria: (id) => {
+      // as imagens que estavam nessa categoria voltam para "Produto" (nenhuma imagem é apagada)
+      setCategorias((cs) => cs.filter((x) => x.id !== id));
+      setProdutos((ps) => ps.map((p) => ({ ...p, imagens: p.imagens.map((i) => (i.rotulo === id ? { ...i, rotulo: "produto" } : i)) })));
+      if (supabase) (async () => {
+        const a = await supabase.from("produto_imagens").update({ rotulo: "produto" }).eq("rotulo", id);
+        const b = await supabase.from("categorias_imagem").delete().eq("id", id);
+        if (a.error || b.error) falhou("excluir a categoria")(a.error ?? b.error);
+      })();
+    },
     criarProduto: (nome, descricao, palavras) => {
       const id = modoReal ? uuid() : `${slug(nome) || "produto"}-${Date.now().toString(36)}`;
       setProdutos((ps) => [{ id, nome, descricao, palavras, hue: hueDe(id), imagens: [], pasta: "enviado" }, ...ps]);
