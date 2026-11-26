@@ -231,7 +231,7 @@ function UploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
                 </div>
               );
             })}
-            <p className="flex items-center gap-1.5 text-xs text-muted-foreground"><Wifi className="size-3.5" /> Pode fechar o app: o envio retoma sozinho quando voltar.</p>
+            <p className="flex items-center gap-1.5 text-xs text-muted-foreground"><Wifi className="size-3.5" /> Deixe o site aberto enquanto envia. Se a internet cair, o envio continua de onde parou.</p>
           </div>
         )}
 
