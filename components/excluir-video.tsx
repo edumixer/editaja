@@ -47,4 +47,3 @@ export function ExcluirDialog({ video, onClose }: { video: (Video & { origemId?:
     </Dialog>
   );
 }
-
