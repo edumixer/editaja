@@ -24,7 +24,7 @@ export function fonteDoVideo(v: Video): { bucket: string; caminho: string } | nu
  * Capa de verdade do vídeo (modo real): a foto tirada do próprio vídeo no envio;
  * sem ela, um quadro do vídeo editado ou do bruto. Nunca uma arte de exemplo.
  */
-export function CapaReal({ video, className, showPlay = true, size = "md" }: { video: Video; className?: string; showPlay?: boolean; size?: "sm" | "md" | "lg" }) {
+export function CapaReal({ video, className, showPlay = true, size = "md", bruto = false }: { video: Video; className?: string; showPlay?: boolean; size?: "sm" | "md" | "lg"; /** só o vídeo original (nunca o editado) */ bruto?: boolean }) {
   const x = video as Video & Extra;
   const [img, setImg] = React.useState<string | null>(null);
   const [vid, setVid] = React.useState<string | null>(null);
@@ -35,14 +35,14 @@ export function CapaReal({ video, className, showPlay = true, size = "md" }: { v
     (async () => {
       if (!supabase) return;
       if (x.capaPath) { const u = await linkAssinado("brutos", x.capaPath); if (vivo && u) { setImg(u); return; } }
-      const f = fonteDoVideo(video);
+      const f = bruto ? (x.brutoPath ? { bucket: "brutos", caminho: x.brutoPath } : null) : fonteDoVideo(video);
       if (!f) { if (vivo) setFalhou(true); return; }
       const u = await linkAssinado(f.bucket, f.caminho);
       if (!vivo) return;
       if (u) setVid(u); else setFalhou(true);
     })();
     return () => { vivo = false; };
-  }, [x.capaPath, x.brutoPath, x.editadoPath]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [x.capaPath, x.brutoPath, x.editadoPath, bruto]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className={cn("relative aspect-[9/16] overflow-hidden rounded-xl bg-neutral-900 ring-1 ring-black/5", className)}>

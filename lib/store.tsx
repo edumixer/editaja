@@ -3,7 +3,9 @@ import * as React from "react";
 import type { Session } from "@supabase/supabase-js";
 import { VIDEOS_INICIAIS, ETAPAS, type Video, type Status } from "./data";
 import { modoReal, supabase } from "./supabase";
-import { R2_ATIVO, apagarPastas } from "./armazenamento";
+import { R2_ATIVO, apagarPastas, apagarArquivo } from "./armazenamento";
+import { brutoExcluido, brutoEmUso, brutoVencido, familia } from "./bruto";
+import { toast } from "sonner";
 import { gerarComReferencias } from "./textos";
 import { textosSalvos } from "./textos-store";
 import type { Produto } from "./produtos";
@@ -15,7 +17,8 @@ type Ctx = {
   carregando: boolean;
   update: (id: string, patch: Partial<Video>) => void;
   aprovar: (id: string) => void;
-  recusar: (id: string, comentario: string) => void;
+  /** Manda refazer com o comentário. Devolve false se não deu (ex.: o bruto já foi excluído). */
+  recusar: (id: string, comentario: string) => boolean;
   adicionar: (nome: string, mb: number) => string;
   criarVideo: (nome: string, mb: number, produto: string, opcoes: Record<string, unknown>) => Promise<{ id: string; caminho: string; owner: string }>;
   /** Grava no vídeo o que a pessoa escolheu no envio (produto, estilo, headline…). Chamado ao tocar em "Editar". */
@@ -23,6 +26,11 @@ type Ctx = {
   enviarParaEdicao: (id: string) => Promise<void>;
   /** Apaga o vídeo (e as versões ganchos × CTAs dele) do banco e os arquivos do armazenamento. */
   excluirVideo: (id: string) => Promise<void>;
+  /**
+   * Apaga só o ARQUIVO do vídeo bruto (os editados, a capa e a transcrição ficam).
+   * Recusa se o editor ainda estiver usando o bruto (enviando, na fila, editando ou refazendo).
+   */
+  excluirBruto: (id: string) => Promise<void>;
   /** Apaga vários de uma vez (seleção na Aprovação). Original selecionado leva as versões dele junto. */
   excluirVarios: (ids: string[]) => Promise<number>;
   agendar: (id: string, quando: string) => void;
@@ -154,8 +162,44 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     await fetch("/api/editar", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${data.session?.access_token}` }, body: JSON.stringify({ video_id: id }) });
   }, []);
 
+  /* ---------- vídeo bruto: excluir na mão ou sozinho 3 dias depois do envio ---------- */
+  const videosRef = React.useRef(videos);
+  videosRef.current = videos;
+  const excluirBruto = React.useCallback(async (id: string) => {
+    type Extra = Video & { brutoPath?: string; opcoes?: Record<string, unknown> };
+    const lista = videosRef.current;
+    const v = lista.find((x) => x.id === id) as Extra | undefined;
+    if (!v || !v.brutoPath || brutoExcluido(v)) return;
+    if (brutoEmUso(v, lista)) throw new Error("O editor ainda está usando este vídeo. Espere a edição terminar.");
+    if (!supabase) return;
+    await apagarArquivo("brutos", v.brutoPath);
+    const quando = new Date().toISOString();
+    // marca no original e nas versões (ganchos × CTAs), que usam o mesmo arquivo
+    for (const x of familia(v, lista) as Extra[]) {
+      const opcoes = { ...(x.opcoes ?? {}), bruto_excluido_em: quando };
+      setVideos((vs) => vs.map((y) => (y.id === x.id ? ({ ...y, opcoes } as Video) : y)));
+      const { error } = await supabase.from("videos").update({ opcoes }).eq("id", x.id);
+      if (error) { await recarregar(); throw error; }
+    }
+  }, [recarregar]);
+
+  // autoexclusão: ao abrir o site, os brutos com mais de 3 dias (e que o editor não está usando) são apagados.
+  // O vigia do servidor (worker/limpeza_app.py) faz o mesmo de hora em hora, mesmo com o site fechado.
+  const limpando = React.useRef(new Set<string>());
+  React.useEffect(() => {
+    if (!modoReal || !sessao || carregando) return;
+    const vencidos = videos.filter((v) => brutoVencido(v, videos) && !limpando.current.has(v.id));
+    if (!vencidos.length) return;
+    vencidos.forEach((v) => limpando.current.add(v.id));
+    (async () => {
+      let n = 0;
+      for (const v of vencidos) { try { await excluirBruto(v.id); n++; } catch { /* tenta de novo na próxima vez */ } }
+      if (n) toast(`${n} vídeo${n > 1 ? "s" : ""} bruto${n > 1 ? "s" : ""} excluído${n > 1 ? "s" : ""} automaticamente`, { description: "Passaram 3 dias do envio. Os vídeos editados continuam na Biblioteca." });
+    })();
+  }, [videos, sessao, carregando, excluirBruto]);
+
   const value: Ctx = {
-    videos, modoReal, sessao, carregando, update, enviarParaEdicao,
+    videos, modoReal, sessao, carregando, update, enviarParaEdicao, excluirBruto,
     aprovar: (id) => {
       const v = videos.find((x) => x.id === id);
       if (!v) return;
@@ -163,6 +207,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     },
     recusar: (id, comentario) => {
       const v = videos.find((x) => x.id === id);
+      // refazer precisa do bruto: depois que ele foi excluído não dá mais para reeditar
+      const orig = v && ((v as Video & { origemId?: string }).origemId ? videos.find((x) => x.id === (v as Video & { origemId?: string }).origemId) ?? v : v);
+      if (modoReal && orig && brutoExcluido(orig)) {
+        toast.error("Não dá para refazer este vídeo", { description: "O vídeo bruto já foi excluído (3 dias após o envio ou por você). Envie o bruto de novo para reeditar." });
+        return false;
+      }
       setVideos((vs) => vs.map((x) => x.id === id ? {
         ...x, status: "recusado", progresso: 0, etapa: 0, versao: x.versao + 1,
         comentarios: [...x.comentarios, { autor: "Você", texto: comentario, quando: "agora" }],
@@ -174,6 +224,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           await enviarParaEdicao(id);
         })();
       }
+      return true;
     },
     adicionar: (nome, mb) => {
       const id = `${nome.replace(/\.[^.]+$/, "").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-${Date.now().toString(36)}`;

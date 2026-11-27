@@ -121,6 +121,12 @@ export async function existe(key: string) {
   return r.ok;
 }
 
+/** Apaga um arquivo (R2 responde 204 também quando ele já não existe). */
+export async function apagarArquivo(key: string) {
+  const r = await chamar({ metodo: "DELETE", key });
+  if (!r.ok) falhou("apagar", r);
+}
+
 /** Apaga tudo que começa com o prefixo (ex.: "brutos/<dono>/<id>/"). */
 export async function apagarPasta(prefixo: string) {
   let n = 0, token = "";

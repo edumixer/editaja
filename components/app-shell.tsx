@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useStore } from "@/lib/store";
+import { brutoEmUso, brutosGuardados, prazoTexto, venceLogo } from "@/lib/bruto";
 
 type Item = { href: string; label: string; short?: string; desc: string; icon: React.ElementType; tag?: string };
 const GRUPOS: { titulo: string; itens: Item[] }[] = [
@@ -105,6 +106,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pendentes = videos.filter((v) => v.status === "aprovacao").length;
   const editando = videos.filter((v) => ["editando", "fila", "recusado"].includes(v.status)).length;
   const badge = (href: string) => (href === "/aprovacao" ? pendentes : href === "/fila" ? editando : 0);
+  // aviso de autoexclusão: brutos que somem nas próximas 24 h
+  const vencendo = modoReal ? brutosGuardados(videos).filter((v) => venceLogo(v) && !brutoEmUso(v, videos)) : [];
+  const avisos = pendentes + vencendo.length;
 
   return (
     <div className="min-h-dvh lg:grid lg:grid-cols-[260px_1fr]">
@@ -137,10 +141,36 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <span className="min-w-0 flex-1 truncate text-base font-semibold sm:hidden">{NAV.find((n) => isActive(path, n.href))?.label}</span>
           <div className="ml-auto flex shrink-0 items-center gap-0.5 sm:gap-1">
             <ThemeToggle />
-            <Button variant="ghost" size="icon" className="relative" aria-label="Notificações">
-              <Bell className="size-[18px]" />
-              {pendentes > 0 && <span className="absolute right-2.5 top-2.5 size-2 rounded-full bg-destructive ring-2 ring-background" />}
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" className="relative" aria-label={avisos ? `Notificações (${avisos})` : "Notificações"}>
+                  <Bell className="size-[18px]" />
+                  {avisos > 0 && <span className="absolute right-2.5 top-2.5 size-2 rounded-full bg-destructive ring-2 ring-background" />}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-[min(20rem,calc(100vw-2rem))]">
+                <DropdownMenuLabel>Notificações</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                {vencendo.slice(0, 5).map((v) => (
+                  <DropdownMenuItem key={v.id} asChild>
+                    <Link href="/biblioteca" className="flex-col items-start gap-0.5">
+                      <span className="w-full truncate text-sm font-medium">Bruto “{v.titulo}” vai ser excluído</span>
+                      <span className="text-xs text-muted-foreground">{prazoTexto(v, videos)} · os editados continuam</span>
+                    </Link>
+                  </DropdownMenuItem>
+                ))}
+                {vencendo.length > 5 && <DropdownMenuItem asChild><Link href="/biblioteca" className="text-xs">+ {vencendo.length - 5} brutos vencendo · ver na Biblioteca</Link></DropdownMenuItem>}
+                {pendentes > 0 && (
+                  <DropdownMenuItem asChild>
+                    <Link href="/aprovacao" className="flex-col items-start gap-0.5">
+                      <span className="text-sm font-medium">{pendentes} vídeo{pendentes > 1 ? "s" : ""} esperando aprovação</span>
+                      <span className="text-xs text-muted-foreground">Assista e aprove antes de postar</span>
+                    </Link>
+                  </DropdownMenuItem>
+                )}
+                {avisos === 0 && <p className="px-2 py-3 text-center text-xs text-muted-foreground">Nada novo por aqui.</p>}
+              </DropdownMenuContent>
+            </DropdownMenu>
             <DropdownMenu>
               <DropdownMenuTrigger className="ml-1 rounded-full outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40">
                 <Avatar className="size-8 sm:size-9"><AvatarFallback className="brand-gradient text-white">{iniciais}</AvatarFallback></Avatar>

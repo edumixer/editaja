@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import {
-  r2Configurado, urlAssinada, iniciarMultipart, listarPartes, concluirMultipart, cancelarMultipart, existe, apagarPasta,
+  r2Configurado, urlAssinada, iniciarMultipart, listarPartes, concluirMultipart, cancelarMultipart, existe, apagarPasta, apagarArquivo,
 } from "@/lib/r2-servidor";
 
 export const runtime = "nodejs";
@@ -74,6 +74,12 @@ export async function POST(req: Request) {
           n += await apagarPasta(key);
         }
         return NextResponse.json({ apagados: n });
+      }
+      case "apagar_arquivo": {   // um arquivo só (ex.: o vídeo bruto; os editados e a capa ficam)
+        const key = chaveDe(b.bucket, b.caminho);
+        if (key.endsWith("/")) throw new Error("caminho inválido");
+        await apagarArquivo(key);
+        return NextResponse.json({ ok: true });
       }
       default:
         return NextResponse.json({ erro: "ação desconhecida" }, { status: 400 });

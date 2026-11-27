@@ -67,6 +67,13 @@ export async function apagarPastas(owner: string, ids: string[]) {
   }
 }
 
+/** Apaga um arquivo só (ex.: o vídeo bruto), no R2 ou no Supabase. Dá erro se não conseguir. */
+export async function apagarArquivo(bucket: string, caminho: string) {
+  if (ehR2(caminho)) { await api({ acao: "apagar_arquivo", bucket, caminho }); return; }
+  const { error } = await supabase!.storage.from(bucket).remove([caminho]);
+  if (error) throw error;
+}
+
 // ---------------------------------------------------------------- envio em partes direto para o R2
 
 const PARTE = 16 * 1024 * 1024;   // 16 MB por parte (1 GB = 64 partes)

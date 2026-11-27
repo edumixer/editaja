@@ -249,7 +249,7 @@ export default function Revisao() {
   };
   const doRecusar = () => {
     const texto = [motivos.join(" · "), comentario].filter(Boolean).join(" — ");
-    recusar(v.id, texto || "Ajustes solicitados");
+    if (!recusar(v.id, texto || "Ajustes solicitados")) { setRecusarOpen(false); return; }
     registrarFeedback({ video: v.titulo, tipo: "recusa", comentario: comentario || texto, motivos, estiloId });
     setRecusarOpen(false);
     toast("Enviado para reedição", { description: `A versão ${v.versao + 1} vai entrar na fila com o seu comentário.` });
@@ -316,7 +316,7 @@ export default function Revisao() {
               </Card>
               {modoReal && sessao && (v.status === "aprovacao" || v.status === "aprovado") && (
                 <ImagensDoVideo v={v} onRefazer={(texto) => {
-                  recusar(v.id, texto);
+                  if (!recusar(v.id, texto)) return;
                   toast("Refazendo o vídeo com as imagens", { description: `A versão ${v.versao + 1} entrou na fila. Leva de 1 a 3 minutos.` });
                   router.push("/fila");
                 }} />
