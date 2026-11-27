@@ -4,7 +4,7 @@ import { Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import {
-  CloudUpload, Film, FolderPlus, Image as ImageIcon, LayoutGrid, List, MoreHorizontal, Music, Pause, Play, Scissors, Send, Sparkles, Trash2, X, Check, Wifi,
+  Clock, CloudUpload, Film, FolderPlus, Image as ImageIcon, LayoutGrid, List, MoreHorizontal, Music, Pause, Play, Scissors, Send, Sparkles, Trash2, X, Check, Wifi,
 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
@@ -29,6 +29,9 @@ import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { ExcluirDialog } from "@/components/excluir-video";
 import { BarraIndeterminada, LIMITE_UPLOAD_MB } from "@/lib/andamento";
+import { BrutoDialog, PrazoBruto } from "@/components/bruto-video";
+import { CapaReal } from "@/components/capa-video";
+import { brutoEmUso, brutosGuardados, PRAZO_BRUTO_DIAS, temEditados, venceLogo } from "@/lib/bruto";
 
 const ICONES: Record<string, React.ElementType> = { film: Film, scissors: Scissors, send: Send, sparkles: Sparkles, image: ImageIcon, music: Music };
 
@@ -319,22 +322,26 @@ function pastasReais(videos: Video[]) {
   });
   const editado = (v: Video) => !!(v as Video & { editadoPath?: string }).editadoPath;
   return [
-    { id: "brutos", nome: "Brutos", icone: "film", descricao: "Vídeos que você enviou", arquivos: videos.filter((v) => !(v as Video & { origemId?: string }).origemId).map(arq) },
+    // sempre o vídeo ORIGINAL enviado (mesmo depois de editado); some daqui quando o bruto é excluído
+    { id: "brutos", nome: "Material bruto", icone: "film", descricao: `Os vídeos originais que você enviou. Ficam guardados por ${PRAZO_BRUTO_DIAS} dias e depois são excluídos sozinhos; os editados continuam.`, arquivos: brutosGuardados(videos).map(arq) },
     { id: "editados", nome: "Editados", icone: "scissors", descricao: "Prontos ou já aprovados", arquivos: videos.filter(editado).map(arq) },
     { id: "publicados", nome: "Publicados", icone: "send", descricao: "Já foram para o ar", arquivos: videos.filter((v) => v.status === "publicado").map(arq) },
   ];
 }
 
-function TileReal({ a, onClick, onExcluir }: { a: Arquivo & { video: Video }; onClick: () => void; onExcluir: () => void }) {
+function TileReal({ a, onClick, onExcluir, bruto = false }: { a: Arquivo & { video: Video }; onClick: () => void; onExcluir: () => void; bruto?: boolean }) {
   return (
     <Card className="group relative overflow-hidden p-0 transition-shadow hover:shadow-md">
-      <button type="button" onClick={onClick} className="block w-full"><VideoThumb hue={a.hue} video={a.video} className="rounded-none" /></button>
+      <button type="button" onClick={onClick} className="relative block w-full">
+        {bruto ? <CapaReal video={a.video} bruto className="rounded-none" /> : <VideoThumb hue={a.hue} video={a.video} className="rounded-none" />}
+        {bruto && <PrazoBruto v={a.video} className="absolute bottom-2 left-2 max-w-[calc(100%-1rem)] truncate" />}
+      </button>
       <DropdownMenu>
         <DropdownMenuTrigger aria-label="Opções do vídeo" className="absolute right-2 top-2 grid size-8 place-items-center rounded-md bg-black/40 text-white backdrop-blur transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100 data-[state=open]:opacity-100"><MoreHorizontal className="size-4" /></DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          <DropdownMenuItem onSelect={onClick}><Play /> Abrir</DropdownMenuItem>
+          <DropdownMenuItem onSelect={onClick}><Play /> {bruto ? "Assistir o bruto" : "Abrir"}</DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={onExcluir} className="text-destructive data-[highlighted]:text-destructive"><Trash2 /> Excluir</DropdownMenuItem>
+          <DropdownMenuItem onSelect={onExcluir} className="text-destructive data-[highlighted]:text-destructive"><Trash2 /> {bruto ? "Excluir bruto" : "Excluir"}</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
       <div className="p-3">
@@ -353,7 +360,19 @@ function Biblioteca() {
   const [modo, setModo] = React.useState<"grid" | "lista">("grid");
   const [open, setOpen] = React.useState(false);
   const [apagar, setApagar] = React.useState<Video | null>(null);
-  const abrir = (v: Video & { editadoPath?: string }) => router.push(v.editadoPath ? `/aprovacao/${v.id}` : "/fila");
+  const [bruto, setBruto] = React.useState<Video | null>(null);   // player do vídeo bruto original
+  const [brutoExcluir, setBrutoExcluir] = React.useState(false);
+  const naBruta = modoReal && pasta === "brutos";
+  // na aba Material bruto abre o ORIGINAL inteiro; nas outras, o editado
+  const abrir = (v: Video & { editadoPath?: string }) => {
+    if (naBruta) { setBruto(v); return; }
+    router.push(v.editadoPath ? `/aprovacao/${v.id}` : "/fila");
+  };
+  const excluir = (v: Video) => {
+    // no Material bruto, excluir = só o bruto (os editados ficam), pela tela do bruto com confirmação
+    if (naBruta && (temEditados(v, videos) || !brutoEmUso(v, videos))) { setBruto(v); setBrutoExcluir(true); return; }
+    setApagar(v);
+  };
   React.useEffect(() => { if (params.get("upload")) setOpen(true); }, [params]);
   const PASTAS_V = modoReal ? pastasReais(videos) : PASTAS;
   const atual = PASTAS_V.find((p) => p.id === pasta) ?? PASTAS_V[0];
@@ -379,6 +398,16 @@ function Biblioteca() {
         })}
       </div>
 
+      {naBruta && (() => {
+        const logo = atual.arquivos.filter((a) => "video" in a && venceLogo((a as { video: Video }).video) && !brutoEmUso((a as { video: Video }).video, videos)).length;
+        return logo > 0 ? (
+          <div role="status" className="mb-4 flex items-start gap-2 rounded-xl border border-destructive/40 bg-destructive/5 px-3.5 py-2.5 text-sm">
+            <Clock className="mt-0.5 size-4 shrink-0 text-destructive" />
+            <p><b>{logo} {logo === 1 ? "vídeo bruto será excluído" : "vídeos brutos serão excluídos"} nas próximas 24 horas.</b> Baixe {logo === 1 ? "ele" : "eles"} antes se quiser guardar o original. Os vídeos editados continuam.</p>
+          </div>
+        ) : null;
+      })()}
+
       <div className="mb-4 flex items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">{atual.descricao}</p>
         <div className="flex rounded-lg border bg-card p-0.5">
@@ -389,7 +418,7 @@ function Biblioteca() {
 
       {modo === "grid" ? (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6">
-          {atual.arquivos.map((a, i) => ("video" in a ? <TileReal key={(a as { video: Video }).video.id} a={a as Arquivo & { video: Video }} onClick={() => abrir((a as { video: Video }).video)} onExcluir={() => setApagar((a as { video: Video }).video)} /> : <FileTile key={a.nome + i} a={a} />))}
+          {atual.arquivos.map((a, i) => ("video" in a ? <TileReal key={(a as { video: Video }).video.id} a={a as Arquivo & { video: Video }} onClick={() => abrir((a as { video: Video }).video)} onExcluir={() => excluir((a as { video: Video }).video)} bruto={naBruta} /> : <FileTile key={a.nome + i} a={a} />))}
           <button onClick={() => setOpen(true)} className="flex min-h-40 flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed text-sm text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground">
             <CloudUpload className="size-6" /> Adicionar
           </button>
@@ -402,14 +431,15 @@ function Biblioteca() {
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium">{a.nome}</p>
                 <p className="text-xs text-muted-foreground">{a.tamanho} · {a.quando}</p>
+                {naBruta && "video" in a && <PrazoBruto v={(a as { video: Video }).video} className="mt-1" />}
               </div>
               {"video" in a ? (
                 <DropdownMenu>
                   <DropdownMenuTrigger aria-label="Opções do vídeo" className="grid size-8 place-items-center rounded-md hover:bg-accent"><MoreHorizontal className="size-4" /></DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
-                    <DropdownMenuItem onSelect={() => abrir((a as { video: Video }).video)}><Play /> Abrir</DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => abrir((a as { video: Video }).video)}><Play /> {naBruta ? "Assistir o bruto" : "Abrir"}</DropdownMenuItem>
                     <DropdownMenuSeparator />
-                    <DropdownMenuItem onSelect={() => setApagar((a as { video: Video }).video)} className="text-destructive data-[highlighted]:text-destructive"><Trash2 /> Excluir</DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => excluir((a as { video: Video }).video)} className="text-destructive data-[highlighted]:text-destructive"><Trash2 /> {naBruta ? "Excluir bruto" : "Excluir"}</DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
               ) : <Button variant="ghost" size="icon-sm"><MoreHorizontal /></Button>}
@@ -419,6 +449,7 @@ function Biblioteca() {
       )}
 
       <ExcluirDialog video={apagar} onClose={() => setApagar(null)} />
+      <BrutoDialog video={bruto} pedirExcluir={brutoExcluir} onClose={() => { setBruto(null); setBrutoExcluir(false); }} />
       <UploadDialog open={open} onOpenChange={(o) => { setOpen(o); if (!o && params.get("upload")) router.replace("/biblioteca"); }} />
     </>
   );
